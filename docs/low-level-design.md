@@ -456,6 +456,8 @@ Index `schedules (next_fire_at) WHERE state = 'ACTIVE'` serves the materializer.
 
 ### 10.2 Triggers
 
+Decision record for cron evaluation: [ADR-013](decisions/ADR-013-cron-evaluation.md).
+
 - **Cron:** 5 fields (minute, hour, day of month, month, day of week) or 6 (seconds first).
   - Syntax: `*`, `?` (same as `*`), values, ranges `a-b`, steps `*/n`, `a/n` and `a-b/n`, lists, and `JAN`–`DEC` and `SUN`–`SAT` names. Day of week 7 also means Sunday.
   - Macros: `@yearly` (`@annually`), `@monthly`, `@weekly`, `@daily` (`@midnight`) and `@hourly`.
@@ -521,7 +523,7 @@ For schedule jobs, "an earlier run is active" means an earlier-fire job of the s
 
 ### 10.5 Schedule changes
 
-- **Withdrawal** (resolves HLD open question 11):
+- **Withdrawal** (resolves HLD open question 11; [ADR-016](decisions/ADR-016-withdrawing-provisional-schedule-jobs.md)):
   - Deletes the schedule's `SCHEDULED` jobs with `run_at > now()`, and their `schedule_fires` rows.
   - Lowers `fire_count` by the number withdrawn and sets `next_fire_at` to the earliest withdrawn fire time.
   - These jobs are provisional lookahead artifacts. Deleting them, rather than cancelling them, avoids flooding history with up to 2 min of cancellations per edit. It also lets the new definition re-materialize the same fire times. Audit rows record the count.
@@ -599,7 +601,7 @@ One manager per TTL class: pools at 10 s, singletons at 30 s. Each runs a loop e
 
 ## 12. Worker system
 
-Implements HLD §12 and [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.md). Resolves HLD open questions 7 and 8.
+Implements HLD §12 and [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.md). Resolves HLD open questions 7 and 8 ([ADR-014](decisions/ADR-014-worker-protocol.md)).
 
 ### 12.1 Protocol
 
@@ -646,7 +648,7 @@ Every engine node runs the gRPC server, plus a pool lease manager (§11.3).
 - **Commit before send:** a waiter gets its jobs only after the claim commits. If the waiter has gone (timeout or client disconnect) by delivery time, its jobs are **released** (T23).
 - **Losing the lease** (`ErrLeaseLost`, or `OnLost`) stops the pool loop. Its waiters return empty, and their next poll is redirected.
 
-**T23 (`RUNNING` → `READY`, dispatcher): release of an undelivered assignment.**
+**T23 (`RUNNING` → `READY`, dispatcher): release of an undelivered assignment** ([ADR-015](decisions/ADR-015-releasing-undelivered-assignments.md)).
 
 - Guarded by the attempt's ID.
 - `budget_attempts` goes back down, so the attempt doesn't count against the retry budget.

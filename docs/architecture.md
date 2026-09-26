@@ -180,7 +180,7 @@ I3 cannot stop a zombie worker's *external* side effects. That is why I6 exists.
 | C5 | One codebase: `api` and `engine` server roles plus a worker runtime ([ADR-009](decisions/ADR-009-modular-monolith.md)). |
 | C6 | Correctness must not depend on node clocks or on there being a unique leader. |
 | C7 | Implemented in Go ([ADR-012](decisions/ADR-012-language-and-core-libraries.md)). The design itself is language-agnostic. |
-| C8 | Core primitives (leases, claiming, scheduling, retries, dispatch) are built in-house; libraries only for routine concerns such as cron parsing, migrations, HTTP and telemetry. |
+| C8 | Core primitives (leases, claiming, scheduling, retries, dispatch) are built in-house; libraries only for routine concerns such as migrations, HTTP and telemetry. Cron evaluation is in-house too, because its DST behavior is part of the contract ([ADR-013](decisions/ADR-013-cron-evaluation.md)). |
 
 ## 8. Architecture overview
 
@@ -361,7 +361,7 @@ Supporting tables: `api_keys`, `idempotency_keys`, `audit_log`, `operations` (bu
 
 `/attempts` corresponds to the `/executions` endpoint from the original brief. It is named after the Attempt entity.
 
-**Worker protocol (internal).** Transported over gRPC with protobuf ([ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.md), [ADR-012](decisions/ADR-012-language-and-core-libraries.md)).
+**Worker protocol (internal).** Transported over gRPC with protobuf, as unary calls with a long-poll ([ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.md), [ADR-014](decisions/ADR-014-worker-protocol.md)).
 
 | Message | Direction | Purpose |
 |---|---|---|
@@ -574,7 +574,7 @@ sequenceDiagram
 
 ### 11.7 Schedule changes
 
-- **Edits** apply to future fire times. Future jobs already materialized from the old definition but not started are withdrawn, then re-materialized.
+- **Edits** apply to future fire times. Future jobs already materialized from the old definition but not started are withdrawn, then re-materialized ([ADR-016](decisions/ADR-016-withdrawing-provisional-schedule-jobs.md)).
 - **Delete** is a soft delete plus withdrawal of those jobs. History is kept.
 - **Pause and resume**: see [§10.3](#103-cancellation-pause-and-run-now).
 - **Fixed-delay** schedules compute `next_fire_at` when the previous run completes, in the same transaction.
@@ -615,7 +615,7 @@ Decision record: [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.md).
   1. Filter by capability: job type and version, plus labels.
   2. Choose a priority class by smooth weighted round-robin (8:4:2:1) among classes that have eligible work. This is work-conserving: an empty class's share goes to the others, and no non-empty class starves.
   3. Within the class, take the earliest `run_at` first, skipping tenants that are at their concurrency cap for this pool.
-- **Commit before send:** the attempt row (with fencing token) and the job's move to `RUNNING` are committed, guarded by the pool epoch, *before* the assignment is sent. If delivery fails, the attempt is released immediately, or the reaper catches it.
+- **Commit before send:** the attempt row (with fencing token) and the job's move to `RUNNING` are committed, guarded by the pool epoch, *before* the assignment is sent. If delivery fails, the attempt is released immediately, or the reaper catches it ([ADR-015](decisions/ADR-015-releasing-undelivered-assignments.md)).
 - **Soft state only:** ready buffers, per-tenant running counts and waiting polls are rebuilt from the database when ownership changes. Tenant caps are exact in steady state and briefly approximate during an ownership change.
 
 ### 12.4 Worker selection strategies
@@ -1366,24 +1366,30 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-009](decisions/ADR-009-modular-monolith.md) | Modular monolith vs microservices | Accepted |
 | [ADR-010](decisions/ADR-010-deployment-strategy.md) | Deployment strategy | Accepted in part (runtime pending) |
 | [ADR-011](decisions/ADR-011-caching-and-redis.md) | Caching and Redis | Accepted |
-| [ADR-012](decisions/ADR-012-language-and-core-libraries.md) | Language and core libraries | Accepted |
+| [ADR-012](decisions/ADR-012-language-and-core-libraries.md) | Language and core libraries | Accepted; amended by ADR-013 and ADR-014 |
+| [ADR-013](decisions/ADR-013-cron-evaluation.md) | Cron evaluation with explicit DST rules | Accepted |
+| [ADR-014](decisions/ADR-014-worker-protocol.md) | Worker protocol: unary calls, long-poll and owner redirects | Accepted |
+| [ADR-015](decisions/ADR-015-releasing-undelivered-assignments.md) | Releasing assignments that were never delivered | Accepted |
+| [ADR-016](decisions/ADR-016-withdrawing-provisional-schedule-jobs.md) | Schedule changes withdraw provisional jobs by deleting them | Accepted |
 
 ## Appendix C — Open questions for the LLD
 
-1. Keep the promotion step, or let the dispatcher claim due jobs directly? A separate ready table, or a state column only?
-2. Exact schema: partition granularity, indexes, fillfactor and HOT-update strategy.
-3. Attempt storage: current-attempt columns on the job plus history rows, or attempt rows only?
-4. Store payloads in a separate table with shorter retention than job metadata?
-5. Adopt PostgreSQL row-level security as a second tenant-isolation layer?
-6. Concurrent duplicate `Idempotency-Key` requests: wait and replay, or return `409` immediately?
-7. Worker protocol: transport (gRPC or HTTP/2), message schemas and versioning rules.
-8. How pool-owner redirects work, and how workers reconnect and back off.
-9. Dispatcher weighted round-robin details, and how tenant-cap counts are rebuilt after an ownership change.
-10. Semantics of the "buffer one" and "cancel previous" overlap policies.
-11. When a schedule is paused, edited or deleted: delete or mark its withdrawn materialized jobs?
-12. API error model, full contracts and the OpenAPI specification.
-13. Final lease, heartbeat and timeout values, validated by failure tests.
-14. How per-node rate limits adjust as `api` replicas autoscale.
+Resolved questions link to their answer.
+
+1. Keep the promotion step, or let the dispatcher claim due jobs directly? A separate ready table, or a state column only? → [LLD §8.1](low-level-design.md#81-storage-layout)
+2. Exact schema: partition granularity, indexes, fillfactor and HOT-update strategy. → [LLD §8.1](low-level-design.md#81-storage-layout)
+3. Attempt storage: current-attempt columns on the job plus history rows, or attempt rows only? → [LLD §8.1](low-level-design.md#81-storage-layout)
+4. Store payloads in a separate table with shorter retention than job metadata? → [LLD §8.1](low-level-design.md#81-storage-layout)
+5. Adopt PostgreSQL row-level security as a second tenant-isolation layer? → [LLD §8.1](low-level-design.md#81-storage-layout), revisited in phase 12
+6. Concurrent duplicate `Idempotency-Key` requests: wait and replay, or return `409` immediately? → [LLD §8.4](low-level-design.md#84-idempotency)
+7. Worker protocol: transport (gRPC or HTTP/2), message schemas and versioning rules. → [ADR-014](decisions/ADR-014-worker-protocol.md)
+8. How pool-owner redirects work, and how workers reconnect and back off. → [ADR-014](decisions/ADR-014-worker-protocol.md)
+9. Dispatcher weighted round-robin details, and how tenant-cap counts are rebuilt after an ownership change. → [LLD §12.3](low-level-design.md#123-dispatcher)
+10. Semantics of the "buffer one" and "cancel previous" overlap policies. → [LLD §10.4](low-level-design.md#104-promoter-and-overlap-policies)
+11. When a schedule is paused, edited or deleted: delete or mark its withdrawn materialized jobs? → [ADR-016](decisions/ADR-016-withdrawing-provisional-schedule-jobs.md)
+12. API error model, full contracts and the OpenAPI specification. → [LLD §9](low-level-design.md#9-job-api), [OpenAPI](../api/openapi.yaml)
+13. Final lease, heartbeat and timeout values, validated by failure tests. *Open until phase 10.*
+14. How per-node rate limits adjust as `api` replicas autoscale. → [LLD §9.6](low-level-design.md#96-admission-control-phase-4-part)
 
 ## Appendix D — Glossary
 

@@ -321,6 +321,7 @@ components:
         overlap_policy: { type: string, enum: [skip, buffer_one, allow, cancel_previous], default: skip }
     Schedule:
       type: object
+      description: "Jobs a schedule has materialized but that aren't due yet are provisional: pausing, editing or deleting the schedule withdraws them (ADR-016)."
       properties:
         id: { type: string, format: uuid }
         name: { type: string }

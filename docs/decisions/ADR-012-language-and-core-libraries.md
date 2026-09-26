@@ -1,6 +1,6 @@
 # ADR-012: Language and core libraries
 
-- **Status:** Accepted
+- **Status:** Accepted. Amended by [ADR-013](ADR-013-cron-evaluation.md) (cron) and [ADR-014](ADR-014-worker-protocol.md) (worker protocol).
 - **Date:** 2026-09-26
 - **Related:** [ADR-002](ADR-002-worker-pull-via-dispatcher.md), [ADR-004](ADR-004-database.md), [ADR-009](ADR-009-modular-monolith.md), [Implementation plan](../implementation-plan.md)
 
@@ -40,12 +40,12 @@ Which language, and which core libraries, should the platform be built with?
 | PostgreSQL driver | `pgx` v5 with `pgxpool` | Fastest native driver; batching and pipelining for the write path |
 | Data access | Hand-written SQL in repositories; no ORM | Guarded state transitions must be visible and reviewable |
 | Migrations | `goose`, with embedded SQL files | Plain SQL, can run in-process or as a separate step |
-| Worker protocol | gRPC with protobuf; generated code committed | Streaming for heartbeats and cancellation; SDKs in other languages later; supported by AWS load balancers |
+| Worker protocol | gRPC with protobuf; generated code committed. *Amended by [ADR-014](ADR-014-worker-protocol.md): unary calls with a long-poll, not streaming.* | Streaming for heartbeats and cancellation; SDKs in other languages later; supported by AWS load balancers |
 | Worker authentication | Per-pool bearer tokens over TLS (V1); mTLS optional later | Simple to rotate; enough inside the trust boundary |
 | Logging | `log/slog` (JSON) | Standard library; structured |
 | Telemetry | OpenTelemetry SDK (traces, metrics) → OTLP → OTel Collector | Vendor-neutral; the backend is chosen in the deployment phase |
 | IDs | UUIDv7 | Time-ordered, so indexes stay compact |
-| Cron parsing | Evaluated in the scheduler phase: an established parser plus our own DST-aware next-fire computation, verified by DST tests | DST semantics (A7) must be exact |
+| Cron parsing | Evaluated in the scheduler phase: an established parser plus our own DST-aware next-fire computation, verified by DST tests. *Amended by [ADR-013](ADR-013-cron-evaluation.md): parser and evaluator are both in-house.* | DST semantics (A7) must be exact |
 | Tests | Standard `testing`; `testing/synctest` for time-dependent concurrency; integration tests against real PostgreSQL (embedded by default, or `JS_TEST_DATABASE_URL`) | No mocks of the database for correctness-critical code; tests need no Docker |
 | Load tests | k6 | Scriptable; HTTP and gRPC |
 | Container image | Static binary on a distroless, non-root base | Small, minimal attack surface |

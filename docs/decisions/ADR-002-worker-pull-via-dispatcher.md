@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-26
-- **Related:** [HLD §12](../architecture.md#12-worker-architecture), [ADR-005](ADR-005-distributed-locking-and-fencing.md), [ADR-007](ADR-007-execution-semantics.md)
+- **Related:** [HLD §12](../architecture.md#12-worker-architecture), [ADR-005](ADR-005-distributed-locking-and-fencing.md), [ADR-007](ADR-007-execution-semantics.md), [ADR-014](ADR-014-worker-protocol.md), [ADR-015](ADR-015-releasing-undelivered-assignments.md)
 
 ## Context
 
