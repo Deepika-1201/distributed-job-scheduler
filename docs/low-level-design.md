@@ -12,7 +12,7 @@ Implements the [HLD](architecture.md). This document grows phase by phase, and e
 | [6. Retry decision](#6-retry-decision) | 2 | Written |
 | [7. Priority selection](#7-priority-selection) | 2 | Written |
 | [8. Persistence](#8-persistence) | 3 | Written |
-| API contracts, error model, OpenAPI | 4 | Planned |
+| [9. Job API](#9-job-api) | 4 | Written |
 | Scheduler internals | 6 | Planned |
 | Leases and fencing | 7 | Planned |
 | Worker protocol and dispatcher internals | 8 | Planned |
@@ -357,3 +357,85 @@ Domain errors live in `domain`: `ErrNotFound`, `ErrStaleAttempt`, `ErrIdempotenc
 - Tests run against real PostgreSQL 17, either the server in `JS_TEST_DATABASE_URL` or an embedded one that is downloaded once and cached.
 - Each test gets a fresh database cloned from a migrated template (`CREATE DATABASE … TEMPLATE`), so tests are isolated and can run in parallel.
 - `go test -short` skips them.
+
+## 9. Job API
+
+The contract is written as OpenAPI in [`api/openapi.yaml`](../api/openapi.yaml). A test checks that every registered route is documented, and that every documented route is registered.
+
+### 9.1 Conventions
+
+- JSON over HTTP(S), base path `/v1`, authenticated with `Authorization: Bearer <api key>`.
+- Timestamps are RFC 3339. Durations are Go duration strings (`"30s"`, `"1h"`). Priorities are names (`"HIGH"`).
+- Request bodies are limited to 1 MiB and payloads to 64 KiB. Unknown JSON fields are rejected, so typos fail loudly.
+- The request ID is taken from `X-Request-Id` if it is a safe string of up to 64 characters; otherwise one is generated. It is echoed back, logged, and written to audit records.
+- **Pagination:** `?limit=` (1–200, default 50) and an opaque `?cursor=`. Responses have the form `{"items": [...], "next_cursor": "..."}`.
+
+### 9.2 Errors
+
+The body is always `{"error": {"code", "message", "request_id", "details"}}`. Internal error details are logged, never returned.
+
+| HTTP | `code` | When |
+|---|---|---|
+| 400 | `invalid_json` | The body is not valid JSON, or has unknown fields |
+| 401 | `unauthenticated` | The key is missing, malformed, unknown, expired or revoked |
+| 403 | `permission_denied` | The key's role is too low (including `CRITICAL` priority below operator) |
+| 404 | `not_found` | The resource doesn't exist, or belongs to another tenant |
+| 409 | `conflict` | The transition is illegal for the current state (`details.state` holds it), the job type already exists, or a dedupe key is taken |
+| 409 | `idempotency_in_progress` | The same idempotency key is still being processed |
+| 413 | `payload_too_large` | The body or payload is over its limit |
+| 422 | `invalid_argument` | Validation failed; `details.fields` maps each field to its problem |
+| 422 | `idempotency_key_reused` | The same key was sent with a different body |
+| 429 | `rate_limited` | The tenant's rate limit was hit; `Retry-After` is set |
+| 500 | `internal` | An unexpected error, logged with the request ID |
+
+### 9.3 Authentication and authorization
+
+- **Key format:** `jsk_<prefix>_<secret>`, where the prefix is 8 random characters and the secret is 32 random bytes. The database stores the prefix and a SHA-256 hash of the whole key, and the key is shown once at creation.
+- **Verification:** look up by prefix, then compare hashes in constant time. A successful check is cached in-process for 30 s, so a revoked key stops working within 30 s.
+- **Roles** are hierarchical: `viewer` < `submitter` < `operator` < `admin`. Each key has one role and belongs to one tenant, and the tenant comes only from the key.
+- **Bootstrap:** `jobscheduler bootstrap <tenant>` creates a tenant and an admin key.
+
+| Method | Path | Minimum role |
+|---|---|---|
+| `GET` | every read endpoint | viewer |
+| `POST` | `/v1/jobs`, `/v1/jobs/{id}/cancel` | submitter |
+| `POST` | `/v1/jobs/{id}/pause`, `/resume`, `/run`, `/retry` | operator |
+| `POST` / `PATCH` | `/v1/job-types`, `/v1/job-types/{name}` | admin |
+| `POST` / `DELETE` | `/v1/api-keys`, `/v1/api-keys/{id}` | admin |
+
+### 9.4 Submitting a job
+
+1. The job type must exist and be enabled; otherwise `422` on `type`.
+2. Priority, attempt timeout and retry policy default to the job type's values. A request can override individual retry-policy fields, and the result is validated against the platform limits (§6).
+3. `run_at` or `delay` may be given, but not both. Neither means "now".
+4. Labels: up to 16, with keys up to 64 characters and values up to 256. `dedupe_key` is up to 255 characters. The payload defaults to `{}`.
+5. With an `Idempotency-Key` header, the request hash is the SHA-256 of the body.
+
+| Outcome | Status | `X-Submission-Outcome` |
+|---|---|---|
+| Created | `201` | `created` |
+| Retry of an earlier request with the same key | `200` | `replayed` |
+| An active job with the same `dedupe_key` exists | `200` | `deduplicated` |
+
+### 9.5 Lifecycle operations
+
+| Operation | Allowed from | Effect |
+|---|---|---|
+| Cancel | Not started / running / cancelled | Moves to `CANCELLED`, flags a running job, or is a no-op |
+| Pause | `SCHEDULED`, `READY` | → `PAUSED` |
+| Resume | `PAUSED` | → `SCHEDULED`; the promoter makes it `READY` when due |
+| Run now | `SCHEDULED`, `PAUSED` (a no-op on `READY`) | `run_at = now()`; a paused job is resumed |
+| Retry | `FAILED`, `DEAD_LETTERED` | → `READY` with a fresh retry budget. `attempt_count` is kept, because fencing tokens must keep increasing. |
+
+Any other starting state gets `409` with the current state. Each operation writes its `audit_log` row in the same transaction (I5).
+
+### 9.6 Admission control (phase 4 part)
+
+- Each `api` node runs a token bucket per tenant. The rate is `JS_TENANT_RATE_LIMIT ÷ JS_API_REPLICAS` per second (default 500 ÷ 1), with a burst of twice that ([ADR-011](decisions/ADR-011-caching-and-redis.md)).
+- Pending-job quotas and priority-based global shedding come in phase 12.
+
+### 9.7 Listing jobs
+
+- `GET /v1/jobs` can filter by `state`, `type` and `label=key:value`.
+- It reads `jobs` and `job_history` with the same filter, ordered by `(created_at, id)` descending. It fetches `limit + 1` rows from each, merges them, and encodes the cursor from the last row returned.
+- An active-state filter reads only `jobs`, and a terminal-state filter reads only `job_history`.

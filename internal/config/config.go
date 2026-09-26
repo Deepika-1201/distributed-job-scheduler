@@ -29,12 +29,23 @@ func (r Roles) Has(role Role) bool { return slices.Contains(r, role) }
 
 type Config struct {
 	Roles           Roles
+	HTTPAddr        string
 	OpsAddr         string
+	API             API
 	Database        Database
 	Log             Log
 	ShutdownDelay   time.Duration
 	ShutdownTimeout time.Duration
 }
+
+type API struct {
+	// TenantRateLimit is each tenant's request budget per second across all api replicas.
+	TenantRateLimit float64
+	Replicas        int
+}
+
+// NodeRateLimit is the share of the tenant rate limit enforced by one api replica.
+func (a API) NodeRateLimit() float64 { return a.TenantRateLimit / float64(a.Replicas) }
 
 type Database struct {
 	URL      string
@@ -51,8 +62,13 @@ type Log struct {
 func Load(lookup func(string) (string, bool)) (Config, error) {
 	p := &parser{lookup: lookup}
 	cfg := Config{
-		Roles:   p.roles("JS_ROLES", "api,engine"),
-		OpsAddr: p.str("JS_OPS_ADDR", ":9090"),
+		Roles:    p.roles("JS_ROLES", "api,engine"),
+		HTTPAddr: p.str("JS_HTTP_ADDR", ":8080"),
+		OpsAddr:  p.str("JS_OPS_ADDR", ":9090"),
+		API: API{
+			TenantRateLimit: p.floatInRange("JS_TENANT_RATE_LIMIT", 500, 1, 1e6),
+			Replicas:        p.intInRange("JS_API_REPLICAS", 1, 1, 1000),
+		},
 		Database: Database{
 			URL:      p.required("JS_DATABASE_URL"),
 			MaxConns: int32(p.intInRange("JS_DB_MAX_CONNS", 10, 1, 1000)),
@@ -63,6 +79,9 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		},
 		ShutdownDelay:   p.duration("JS_SHUTDOWN_DELAY", 0),
 		ShutdownTimeout: p.duration("JS_SHUTDOWN_TIMEOUT", 30*time.Second),
+	}
+	if cfg.HTTPAddr == cfg.OpsAddr {
+		p.fail("JS_HTTP_ADDR", "must differ from JS_OPS_ADDR")
 	}
 	if err := errors.Join(p.errs...); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration:\n%w", err)
@@ -111,6 +130,19 @@ func (p *parser) intInRange(key string, def, lo, hi int) int {
 		return def
 	}
 	return n
+}
+
+func (p *parser) floatInRange(key string, def, lo, hi float64) float64 {
+	v, ok := p.get(key)
+	if !ok {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < lo || f > hi {
+		p.fail(key, "must be a number between %g and %g, got %q", lo, hi, v)
+		return def
+	}
+	return f
 }
 
 func (p *parser) duration(key string, def time.Duration) time.Duration {

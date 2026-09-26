@@ -1,0 +1,263 @@
+openapi: 3.1.0
+info:
+  title: Distributed Job Scheduler API
+  version: 1.0.0
+  description: >
+    Submit, schedule and manage background jobs. Conventions, error codes and roles are
+    described in docs/low-level-design.md §9. Every request needs
+    `Authorization: Bearer <api key>`.
+servers:
+  - url: http://localhost:8080
+security:
+  - apiKey: []
+
+paths:
+  /v1/job-types:
+    post:
+      summary: Register a job type (admin)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/JobTypeRequest" } } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/JobType" } } } }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+    get:
+      summary: List job types
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/JobTypeList" } } } }
+  /v1/job-types/{name}:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    get:
+      summary: Get a job type
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/JobType" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Update a job type (admin); omitted fields are unchanged
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/JobTypeRequest" } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/JobType" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/jobs:
+    post:
+      summary: Submit a job (submitter; CRITICAL priority needs operator)
+      parameters:
+        - { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 255 } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SubmitJobRequest" } } } }
+      responses:
+        "201": { description: Created (X-Submission-Outcome created), content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "200": { description: Replayed or deduplicated (X-Submission-Outcome), content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+    get:
+      summary: List jobs, newest first
+      parameters:
+        - { name: state, in: query, schema: { $ref: "#/components/schemas/JobState" } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: label, in: query, description: "key:value", schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/JobList" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /v1/jobs/{id}:
+    parameters: [{ $ref: "#/components/parameters/JobID" }]
+    get:
+      summary: Get a job
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/jobs/{id}/attempts:
+    parameters: [{ $ref: "#/components/parameters/JobID" }]
+    get:
+      summary: List a job's attempts, including the running one
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/AttemptList" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/jobs/{id}/cancel:
+    parameters: [{ $ref: "#/components/parameters/JobID" }]
+    post: { summary: Cancel a job (submitter), responses: { "200": { $ref: "#/components/responses/Job" }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Conflict" } } }
+  /v1/jobs/{id}/pause:
+    parameters: [{ $ref: "#/components/parameters/JobID" }]
+    post: { summary: Pause a job that hasn't started (operator), responses: { "200": { $ref: "#/components/responses/Job" }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Conflict" } } }
+  /v1/jobs/{id}/resume:
+    parameters: [{ $ref: "#/components/parameters/JobID" }]
+    post: { summary: Resume a paused job (operator), responses: { "200": { $ref: "#/components/responses/Job" }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Conflict" } } }
+  /v1/jobs/{id}/run:
+    parameters: [{ $ref: "#/components/parameters/JobID" }]
+    post: { summary: Run a delayed or paused job now (operator), responses: { "200": { $ref: "#/components/responses/Job" }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Conflict" } } }
+  /v1/jobs/{id}/retry:
+    parameters: [{ $ref: "#/components/parameters/JobID" }]
+    post: { summary: Retry a FAILED or DEAD_LETTERED job (operator), responses: { "200": { $ref: "#/components/responses/Job" }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Conflict" } } }
+
+  /v1/api-keys:
+    post:
+      summary: Create an API key (admin); the key is returned only once
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/APIKeyRequest" } } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/APIKey" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /v1/api-keys/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+    delete:
+      summary: Revoke an API key (admin)
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/Error" }
+
+components:
+  securitySchemes:
+    apiKey: { type: http, scheme: bearer, description: "jsk_<prefix>_<secret>" }
+  parameters:
+    JobID: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+  responses:
+    Error:
+      description: Error (see LLD §9.2 for codes)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Job:
+      description: The job after the operation
+      content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } }
+    Conflict:
+      description: Not allowed from the job's current state (details.state holds it)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: { type: string, examples: [invalid_argument, not_found, conflict, rate_limited] }
+            message: { type: string }
+            request_id: { type: string }
+            details: { type: object }
+    Priority: { type: string, enum: [CRITICAL, HIGH, NORMAL, LOW] }
+    JobState:
+      type: string
+      enum: [SCHEDULED, READY, RUNNING, RETRY_PENDING, PAUSED, SUCCEEDED, FAILED, DEAD_LETTERED, CANCELLED, EXPIRED, SKIPPED]
+    Duration: { type: string, description: Go duration, examples: ["30s", "5m", "1h"] }
+    RetryPolicy:
+      type: object
+      properties:
+        strategy: { type: string, enum: [fixed, exponential] }
+        initial_delay: { $ref: "#/components/schemas/Duration" }
+        multiplier: { type: number }
+        max_delay: { $ref: "#/components/schemas/Duration" }
+        jitter: { type: string, enum: [none, full] }
+        max_attempts: { type: integer }
+        max_retry_duration: { $ref: "#/components/schemas/Duration" }
+        max_lost_attempts: { type: integer }
+    JobTypeRequest:
+      type: object
+      properties:
+        name: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,99}$" }
+        pool: { type: string }
+        default_priority: { $ref: "#/components/schemas/Priority" }
+        attempt_timeout: { $ref: "#/components/schemas/Duration" }
+        retry_policy: { $ref: "#/components/schemas/RetryPolicy" }
+        at_most_once: { type: boolean }
+        enabled: { type: boolean }
+    JobType:
+      type: object
+      properties:
+        name: { type: string }
+        version: { type: integer }
+        pool: { type: string }
+        default_priority: { $ref: "#/components/schemas/Priority" }
+        attempt_timeout: { $ref: "#/components/schemas/Duration" }
+        retry_policy: { $ref: "#/components/schemas/RetryPolicy" }
+        at_most_once: { type: boolean }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    JobTypeList:
+      type: object
+      properties: { items: { type: array, items: { $ref: "#/components/schemas/JobType" } } }
+    SubmitJobRequest:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string }
+        payload: { description: "Any JSON value up to 64 KiB; defaults to {}" }
+        run_at: { type: string, format: date-time }
+        delay: { $ref: "#/components/schemas/Duration" }
+        priority: { $ref: "#/components/schemas/Priority" }
+        labels: { type: object, additionalProperties: { type: string }, maxProperties: 16 }
+        dedupe_key: { type: string, maxLength: 255 }
+        correlation_id: { type: string, maxLength: 128 }
+        start_deadline: { type: string, format: date-time }
+        deadline: { type: string, format: date-time }
+        attempt_timeout: { $ref: "#/components/schemas/Duration" }
+        retry_policy: { $ref: "#/components/schemas/RetryPolicy" }
+    Attempt:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: integer, description: Also the attempt's fencing token }
+        state: { type: string, enum: [RUNNING, SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, LOST] }
+        started_at: { type: string, format: date-time }
+        deadline: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        error: { type: string }
+        retryable: { type: boolean }
+    AttemptList:
+      type: object
+      properties: { items: { type: array, items: { $ref: "#/components/schemas/Attempt" } } }
+    Job:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string }
+        type_version: { type: integer }
+        pool: { type: string }
+        schedule_id: { type: string, format: uuid }
+        fire_time: { type: string, format: date-time }
+        state: { $ref: "#/components/schemas/JobState" }
+        priority: { $ref: "#/components/schemas/Priority" }
+        payload: {}
+        labels: { type: object, additionalProperties: { type: string } }
+        dedupe_key: { type: string }
+        correlation_id: { type: string }
+        created_by: { type: string }
+        run_at: { type: string, format: date-time }
+        start_deadline: { type: string, format: date-time }
+        deadline: { type: string, format: date-time }
+        attempt_timeout: { $ref: "#/components/schemas/Duration" }
+        retry_policy: { $ref: "#/components/schemas/RetryPolicy" }
+        attempt_count: { type: integer }
+        current_attempt: { $ref: "#/components/schemas/Attempt" }
+        cancel_requested_at: { type: string, format: date-time }
+        last_error: { type: string }
+        result: {}
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
+        ready_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+    JobList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Job" } }
+        next_cursor: { type: string }
+    APIKeyRequest:
+      type: object
+      required: [name, role]
+      properties:
+        name: { type: string, maxLength: 100 }
+        role: { type: string, enum: [viewer, submitter, operator, admin] }
+        expires_at: { type: string, format: date-time }
+    APIKey:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        role: { type: string }
+        key: { type: string, description: Shown only in the creation response }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }

@@ -22,8 +22,11 @@ func TestLoadDefaults(t *testing.T) {
 	if !cfg.Roles.Has(RoleAPI) || !cfg.Roles.Has(RoleEngine) || len(cfg.Roles) != 2 {
 		t.Errorf("Roles = %v, want [api engine]", cfg.Roles)
 	}
-	if cfg.OpsAddr != ":9090" {
-		t.Errorf("OpsAddr = %q", cfg.OpsAddr)
+	if cfg.OpsAddr != ":9090" || cfg.HTTPAddr != ":8080" {
+		t.Errorf("addrs = %q, %q", cfg.OpsAddr, cfg.HTTPAddr)
+	}
+	if cfg.API.TenantRateLimit != 500 || cfg.API.Replicas != 1 || cfg.API.NodeRateLimit() != 500 {
+		t.Errorf("API = %+v", cfg.API)
 	}
 	if cfg.Database.MaxConns != 10 {
 		t.Errorf("MaxConns = %d", cfg.Database.MaxConns)
@@ -93,6 +96,23 @@ func TestLoadRejectsEmptyRoles(t *testing.T) {
 	_, err := Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs", "JS_ROLES": " , "}))
 	if err == nil || !strings.Contains(err.Error(), "at least one role is required") {
 		t.Fatalf("err = %v, want missing-role error", err)
+	}
+}
+
+func TestLoadAPISettings(t *testing.T) {
+	cfg, err := Load(env(map[string]string{
+		"JS_DATABASE_URL": "postgres://db/jobs", "JS_TENANT_RATE_LIMIT": "900", "JS_API_REPLICAS": "3",
+	}))
+	if err != nil || cfg.API.NodeRateLimit() != 300 {
+		t.Fatalf("NodeRateLimit = %v, %v; want 300", cfg.API.NodeRateLimit(), err)
+	}
+	_, err = Load(env(map[string]string{
+		"JS_DATABASE_URL": "postgres://db/jobs", "JS_HTTP_ADDR": ":9090", "JS_TENANT_RATE_LIMIT": "0",
+	}))
+	for _, want := range []string{"JS_HTTP_ADDR: must differ", "JS_TENANT_RATE_LIMIT"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
 	}
 }
 

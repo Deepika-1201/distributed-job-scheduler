@@ -31,6 +31,8 @@ func TestMain(m *testing.M) {
 
 var ctx = context.Background()
 
+var testAudit = Audit{Actor: "test", RequestID: "req-test"}
+
 type fixture struct {
 	t      *testing.T
 	store  *Store
@@ -250,7 +252,7 @@ func TestDedupeKeyIsUniqueAmongActiveJobs(t *testing.T) {
 		t.Fatalf("duplicate = %v %s, %v; want existing %s", res.Outcome, res.Job.ID, err, first.ID)
 	}
 
-	if _, err := f.store.RequestCancel(ctx, f.tenant, first.ID); err != nil {
+	if _, err := f.store.RequestCancel(ctx, f.tenant, first.ID, testAudit); err != nil {
 		t.Fatal(err)
 	}
 	second, err := f.store.SubmitJob(ctx, f.newJob(withKey), nil)

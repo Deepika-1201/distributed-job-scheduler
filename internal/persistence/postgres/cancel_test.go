@@ -18,17 +18,17 @@ func TestCancelByState(t *testing.T) {
 	f := newFixture(t)
 
 	scheduled := f.submit(f.newJob(func(nj *NewJob) { nj.RunAt = time.Now().Add(time.Hour) }))
-	got, err := f.store.RequestCancel(ctx, f.tenant, scheduled.ID)
+	got, err := f.store.RequestCancel(ctx, f.tenant, scheduled.ID, testAudit)
 	if err != nil || got.State != domain.StateCancelled || got.Reason != domain.ReasonCancelled || got.FinishedAt.IsZero() {
 		t.Fatalf("cancel scheduled = %s %s, %v", got.State, got.Reason, err)
 	}
-	if again, err := f.store.RequestCancel(ctx, f.tenant, scheduled.ID); err != nil || again.State != domain.StateCancelled {
+	if again, err := f.store.RequestCancel(ctx, f.tenant, scheduled.ID, testAudit); err != nil || again.State != domain.StateCancelled {
 		t.Errorf("repeat cancel = %s, %v; want an idempotent no-op", again.State, err)
 	}
 
 	f.submit(f.newJob())
 	running := f.claimOne()
-	flagged, err := f.store.RequestCancel(ctx, f.tenant, running.ID)
+	flagged, err := f.store.RequestCancel(ctx, f.tenant, running.ID, testAudit)
 	if err != nil || flagged.State != domain.StateRunning || flagged.CancelRequestedAt.IsZero() {
 		t.Fatalf("cancel running = %s (requested %v), %v", flagged.State, flagged.CancelRequestedAt, err)
 	}
@@ -39,15 +39,15 @@ func TestCancelByState(t *testing.T) {
 	f.submit(f.newJob())
 	done := f.claimOne()
 	f.complete(completion(done, succeeded))
-	if _, err := f.store.RequestCancel(ctx, f.tenant, done.ID); !errors.Is(err, domain.ErrInvalidTransition) {
+	if _, err := f.store.RequestCancel(ctx, f.tenant, done.ID, testAudit); !errors.Is(err, domain.ErrInvalidTransition) {
 		t.Errorf("cancel succeeded job: %v, want ErrInvalidTransition", err)
 	}
 
-	if _, err := f.store.RequestCancel(ctx, f.tenant, domain.JobID(uuid.NewString())); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := f.store.RequestCancel(ctx, f.tenant, domain.JobID(uuid.NewString()), testAudit); !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("cancel unknown job: %v, want ErrNotFound", err)
 	}
 	other := f.addTenant("globex")
-	if _, err := f.store.RequestCancel(ctx, other, scheduled.ID); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := f.store.RequestCancel(ctx, other, scheduled.ID, testAudit); !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("cancel another tenant's job: %v, want ErrNotFound", err)
 	}
 }
@@ -81,7 +81,7 @@ func TestCancelRacesWithClaim(t *testing.T) {
 	})
 	wg.Go(func() {
 		for _, id := range jobIDs {
-			if _, err := f.store.RequestCancel(ctx, f.tenant, id); err != nil {
+			if _, err := f.store.RequestCancel(ctx, f.tenant, id, testAudit); err != nil {
 				t.Error(err)
 			}
 		}

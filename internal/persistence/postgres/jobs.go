@@ -455,7 +455,7 @@ func moveToHistory(ctx context.Context, tx pgx.Tx, jobID string, from domain.Job
 // RequestCancel cancels a job that hasn't started, or flags a running job so its worker is
 // told to stop; the job then ends CANCELLED whatever the attempt's outcome. Cancelling a job
 // that is already cancelled returns it unchanged.
-func (s *Store) RequestCancel(ctx context.Context, tenantID domain.TenantID, id domain.JobID) (domain.Job, error) {
+func (s *Store) RequestCancel(ctx context.Context, tenantID domain.TenantID, id domain.JobID, audit Audit) (domain.Job, error) {
 	tenant, ok1 := canonicalUUID(string(tenantID))
 	jobID, ok2 := canonicalUUID(string(id))
 	if !ok1 || !ok2 {
@@ -473,18 +473,23 @@ func (s *Store) RequestCancel(ctx context.Context, tenantID domain.TenantID, id 
 			return err
 		case job.State == domain.StateRunning:
 			res = job
-			if job.CancelRequestedAt.IsZero() {
-				res, err = scanJob(tx.QueryRow(ctx,
-					`UPDATE jobs SET cancel_requested_at = now(), updated_at = now() WHERE id = $1 RETURNING `+activeColumns, jobID))
+			if !job.CancelRequestedAt.IsZero() {
+				return nil
 			}
-			return err
+			if res, err = scanJob(tx.QueryRow(ctx,
+				`UPDATE jobs SET cancel_requested_at = now(), updated_at = now() WHERE id = $1 RETURNING `+activeColumns, jobID)); err != nil {
+				return err
+			}
+			return writeAudit(ctx, tx, tenant, audit, "job.cancel", jobID, map[string]any{"from": job.State, "cancel_requested": true})
 		}
 		if err := domain.ValidateJobTransition(job.State, domain.StateCancelled, domain.ActorAPI); err != nil {
 			return err
 		}
-		res, err = moveToHistory(ctx, tx, jobID, job.State,
-			terminal{State: domain.StateCancelled, Reason: domain.ReasonCancelled, BudgetLost: job.Budget.Lost})
-		return err
+		if res, err = moveToHistory(ctx, tx, jobID, job.State,
+			terminal{State: domain.StateCancelled, Reason: domain.ReasonCancelled, BudgetLost: job.Budget.Lost}); err != nil {
+			return err
+		}
+		return writeAudit(ctx, tx, tenant, audit, "job.cancel", jobID, map[string]any{"from": job.State, "to": res.State})
 	})
 	return res, err
 }
