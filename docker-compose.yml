@@ -1,0 +1,46 @@
+name: jobscheduler
+
+x-app: &app
+  build: .
+  image: jobscheduler:dev
+  environment: &app-env
+    JS_DATABASE_URL: postgres://jobs:jobs@postgres:5432/jobs?sslmode=disable
+    JS_LOG_FORMAT: text
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: jobs
+      POSTGRES_PASSWORD: jobs # local development only
+      POSTGRES_DB: jobs
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobs -d jobs"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  migrate:
+    <<: *app
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  scheduler:
+    <<: *app
+    environment:
+      <<: *app-env
+      JS_ROLES: api,engine
+    ports:
+      - "9090:9090"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
