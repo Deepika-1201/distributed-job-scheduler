@@ -74,6 +74,9 @@ func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
 	s.handle("POST /v1/schedules/{id}/pause", domain.RoleOperator, s.scheduleAction(store.PauseSchedule))
 	s.handle("POST /v1/schedules/{id}/resume", domain.RoleOperator, s.scheduleAction(store.ResumeSchedule))
 
+	s.handle("POST /v1/operations", domain.RoleOperator, s.createOperation)
+	s.handle("GET /v1/operations/{id}", domain.RoleViewer, s.getOperation)
+
 	s.handle("POST /v1/api-keys", domain.RoleAdmin, s.createAPIKey)
 	s.handle("DELETE /v1/api-keys/{id}", domain.RoleAdmin, s.revokeAPIKey)
 	return s

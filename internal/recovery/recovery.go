@@ -113,6 +113,39 @@ type MaintenanceStore interface {
 	RunMaintenance(ctx context.Context, r postgres.Retention) (postgres.MaintenanceReport, error)
 }
 
+// OperationStore processes bulk operations; *postgres.Store implements it.
+type OperationStore interface {
+	ProcessOperation(ctx context.Context, batch int) (bool, error)
+}
+
+// Operations processes one batch of a bulk operation per second on each engine node, which
+// is the operations' rate limit (LLD §13.3).
+type Operations struct {
+	store OperationStore
+	log   *slog.Logger
+}
+
+func NewOperations(store OperationStore, log *slog.Logger) *Operations {
+	return &Operations{store: store, log: log.With("component", "operations")}
+}
+
+func (o *Operations) Name() string { return "operations" }
+
+func (o *Operations) Run(ctx context.Context) error {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+		if _, err := o.store.ProcessOperation(ctx, 100); err != nil && ctx.Err() == nil {
+			o.log.Warn("operation batch failed", "error", err)
+		}
+	}
+}
+
 // Maintenance returns the singleton duty that runs maintenance at once and then every
 // interval until its lease is lost (LLD §13.2).
 func Maintenance(store MaintenanceStore, ret postgres.Retention, interval time.Duration, log *slog.Logger) func(context.Context) {

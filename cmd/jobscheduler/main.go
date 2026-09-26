@@ -126,6 +126,7 @@ func serve() error {
 			scheduling.NewPromoter(store, log),
 			dispatcher,
 			recovery.NewReaper(store, recovery.ReaperConfig{}, log),
+			recovery.NewOperations(store, log),
 			singletons)
 	}
 	for _, c := range components {

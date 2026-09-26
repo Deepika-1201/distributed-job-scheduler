@@ -15,7 +15,7 @@ Builds the design in [architecture.md](architecture.md) incrementally. Each phas
 | 6 | Scheduler | Materializer, promoter, cron with time zones, fixed-rate, fixed-delay, misfire and overlap policies | DST and misfire tests; no duplicate fires with several engines | Done |
 | 7 | Coordination | Lease manager, epochs, fencing checks, singleton duties | Tests for split brain, lease expiry and handoff | Done |
 | 8 | Worker system | gRPC worker protocol, dispatcher (weighted priority, tenant caps), sessions, heartbeats, cancellation, worker SDK, demo worker | Worker ↔ engine contract tests; end-to-end tests | Done |
-| 9 | Retries and recovery | Retry integration, reaper (with warm-up), timeouts, dead-letter, re-drive, bulk operations | Recovery tests for worker crash, timeout and poison jobs | Next |
+| 9 | Retries and recovery | Retry integration, reaper (with warm-up), timeouts, dead-letter, re-drive, bulk operations | Recovery tests for worker crash, timeout and poison jobs | Done |
 | 10 | Failure testing | Fault-injection suite covering HLD scenarios S1–S14 | Every scenario automated or documented as manual | |
 | 11 | Observability | OpenTelemetry traces and metrics, dashboards, alerts, local telemetry stack | A job traceable end to end; metrics from HLD §17.3 exported | |
 | 12 | Security hardening | Complete RBAC, key rotation, TLS, worker credentials, row-level security decision, security tests | OWASP checklist; tenant-isolation tests | |

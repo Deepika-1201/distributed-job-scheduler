@@ -139,6 +139,21 @@ paths:
     parameters: [{ $ref: "#/components/parameters/ScheduleID" }]
     post: { summary: Resume a paused schedule (operator); missed fires follow the misfire policy, responses: { "200": { $ref: "#/components/responses/Schedule" }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Error" } } }
 
+  /v1/operations:
+    post:
+      summary: Start a bulk cancel or re-drive (operator); it covers jobs created before it and runs asynchronously
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/OperationRequest" } } } }
+      responses:
+        "202": { description: Accepted (Location points at the operation), content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /v1/operations/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+    get:
+      summary: Get a bulk operation's progress
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+
   /v1/api-keys:
     post:
       summary: Create an API key (admin); the key is returned only once
@@ -349,6 +364,35 @@ components:
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/Schedule" } }
         next_cursor: { type: string }
+    OperationFilter:
+      type: object
+      properties:
+        state: { $ref: "#/components/schemas/JobState" }
+        type: { type: string }
+        label: { type: string, description: "key:value" }
+        schedule_id: { type: string, format: uuid }
+    OperationRequest:
+      type: object
+      required: [kind]
+      description: "cancel acts on active jobs; redrive needs filter.state FAILED or DEAD_LETTERED"
+      properties:
+        kind: { type: string, enum: [cancel, redrive] }
+        filter: { $ref: "#/components/schemas/OperationFilter" }
+    Operation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [cancel, redrive] }
+        filter: { $ref: "#/components/schemas/OperationFilter" }
+        state: { type: string, enum: [PENDING, RUNNING, SUCCEEDED, FAILED] }
+        succeeded: { type: integer }
+        skipped: { type: integer, description: Jobs no longer eligible when reached }
+        failed: { type: integer }
+        last_error: { type: string }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
     APIKeyRequest:
       type: object
       required: [name, role]

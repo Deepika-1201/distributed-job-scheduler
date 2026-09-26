@@ -173,6 +173,8 @@ type JobFilter struct {
 	LabelValue string
 	Limit      int
 	After      *JobCursor
+	// ActiveOnly skips finished jobs, whatever State says.
+	ActiveOnly bool
 }
 
 // JobCursor marks the last job of a page in (created_at, id) descending order.
@@ -228,7 +230,7 @@ func (s *Store) ListJobs(ctx context.Context, tenantID domain.TenantID, f JobFil
 		{`SELECT ` + activeColumns + ` FROM jobs` + listWhere, false},
 		{`SELECT ` + historyColumns + ` FROM job_history` + listWhere, true},
 	} {
-		if f.State != "" && f.State.Terminal() != src.terminal {
+		if f.State != "" && f.State.Terminal() != src.terminal || f.ActiveOnly && src.terminal {
 			continue
 		}
 		rows, err := s.pool.Query(ctx, src.query, args...)

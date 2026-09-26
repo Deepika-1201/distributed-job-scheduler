@@ -2,7 +2,7 @@
 
 A distributed job scheduling and execution platform: durable jobs that run now, later or on a recurring schedule, with at-least-once execution, retries, priorities and fair sharing across tenants, on a horizontally scalable worker fleet.
 
-**Status:** phases 1–4 and 6–8 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies), coordination (epoch-fenced leases with self-fencing) and the worker system (gRPC [protocol](proto/jobscheduler/worker/v1/worker.proto), dispatcher with weighted priorities and tenant caps, [Go SDK](pkg/workersdk), demo worker). Recovery (reaper, maintenance) is next.
+**Status:** phases 1–4 and 6–8 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies), coordination (epoch-fenced leases with self-fencing) and the worker system (gRPC [protocol](proto/jobscheduler/worker/v1/worker.proto), dispatcher with weighted priorities and tenant caps, [Go SDK](pkg/workersdk), demo worker), and recovery (reaper with warm-up, engine-side timeouts, retention and partition maintenance, bulk cancel and re-drive).
 
 ## Documentation
 
@@ -51,6 +51,7 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 | `JS_WORKER_TOKEN` | required for `engine` (≥ 16 chars) |
 | `JS_WORKER_ADDR` / `JS_WORKER_ADVERTISE_ADDR` | `:7070` / the listen address |
 | `JS_NODE_ID` | hostname + random suffix |
+| `JS_HISTORY_RETENTION` | `720h` (30 days) |
 
 Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./bin/demo-worker`.
 | `JS_DB_MAX_CONNS` | `10` |

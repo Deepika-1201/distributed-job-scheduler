@@ -726,15 +726,15 @@ A singleton duty under lease `singleton:maintenance` (§11.3). It runs when the 
 | `POST /v1/operations` | operator | Body `{"kind": "cancel" \| "redrive", "filter": {...}}` → `202` with the operation |
 | `GET /v1/operations/{id}` | viewer | State and counts |
 
-- **Filter:** the same fields as `GET /v1/jobs`: `state`, `type`, `label`, `schedule_id`. `cancel` applies to active jobs, and `redrive` to `FAILED` and `DEAD_LETTERED` jobs.
-- **Scope:** only jobs created before the operation are touched.
+- **Filter:** the same fields as `GET /v1/jobs`: `state`, `type`, `label`, `schedule_id`. `cancel` applies to active jobs (`state`, if given, must be active). `redrive` requires `state` to be `FAILED` or `DEAD_LETTERED`.
+- **Scope:** only jobs created before the operation are touched. The keyset cursor starts at the operation's creation time.
 - **Execution:**
-  - Any engine node claims `PENDING` or `RUNNING` operations with `SKIP LOCKED`.
-  - It processes one batch of 100 jobs per operation, oldest first, through the same guarded store methods as the single-job endpoints (`RequestCancel`, `RetryJob`).
-  - After each batch it stores a keyset cursor and the counts (`succeeded`, `skipped` for jobs no longer eligible, `failed`).
-  - The loop runs every second, which is the rate limit.
-- **Crash recovery:** a node that dies mid-batch leaves the cursor at the last completed batch, so its successor repeats at most one batch. Both actions are idempotent, but counts may then over-count by up to one batch.
-- **States:** `PENDING` → `RUNNING` → `SUCCEEDED`. `FAILED` is used when a batch errors 10 times in a row.
+  - Each engine node claims one `PENDING` or `RUNNING` operation per second with `FOR UPDATE SKIP LOCKED`. It holds that lock while it processes one batch of 100 jobs, newest first.
+  - Each job goes through the same guarded store method as its single-job endpoint (`RequestCancel`, `RetryJob`), audited with actor `operation:<id>`.
+  - It then stores the cursor and counts in the same transaction: `succeeded`; `skipped` for jobs that are no longer eligible; `failed` if the batch hit an error.
+- **Crash recovery:** a node that dies mid-batch rolls back that batch's cursor and counts. Its successor repeats the batch, and the actions already applied then count as `skipped`.
+- **Errors:** an unexpected error ends the batch at the last job processed and is retried on the next tick. After 10 consecutive failed batches the operation becomes `FAILED`.
+- **States:** `PENDING` → `RUNNING` → `SUCCEEDED` or `FAILED`.
 
 ### 13.4 Tests
 
