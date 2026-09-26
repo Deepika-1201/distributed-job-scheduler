@@ -2,7 +2,7 @@
 
 A distributed job scheduling and execution platform: durable jobs that run now, later or on a recurring schedule, with at-least-once execution, retries, priorities and fair sharing across tenants, on a horizontally scalable worker fleet.
 
-**Status:** phases 1–3 of the [implementation plan](docs/implementation-plan.md) are done (scaffolding, domain core, persistence). The job API is next.
+**Status:** phases 1–4 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence and the REST API ([OpenAPI](api/openapi.yaml)). The scheduler, worker system and recovery are in progress.
 
 ## Documentation
 
@@ -26,6 +26,15 @@ curl localhost:9090/readyz
 
 To run against an existing PostgreSQL instead: `JS_DATABASE_URL=postgres://... make migrate run`.
 
+Create a tenant and its first admin key, then call the API:
+
+```sh
+./bin/jobscheduler bootstrap acme          # prints {"tenant_id": ..., "api_key": "jsk_..."}
+export KEY=jsk_...
+curl -X POST localhost:8080/v1/job-types -H "Authorization: Bearer $KEY" -d '{"name": "email.send"}'
+curl -X POST localhost:8080/v1/jobs -H "Authorization: Bearer $KEY" -d '{"type": "email.send", "payload": {"to": "a@example.com"}}'
+```
+
 ## Configuration
 
 Environment variables, validated at startup (full reference in [LLD §2.5](docs/low-level-design.md#25-configuration)):
@@ -34,7 +43,8 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 |---|---|
 | `JS_DATABASE_URL` | required |
 | `JS_ROLES` | `api,engine` |
-| `JS_OPS_ADDR` | `:9090` |
+| `JS_HTTP_ADDR` / `JS_OPS_ADDR` | `:8080` / `:9090` |
+| `JS_TENANT_RATE_LIMIT` / `JS_API_REPLICAS` | `500` / `1` |
 | `JS_DB_MAX_CONNS` | `10` |
 | `JS_LOG_LEVEL` / `JS_LOG_FORMAT` | `info` / `json` |
 | `JS_SHUTDOWN_DELAY` / `JS_SHUTDOWN_TIMEOUT` | `0s` / `30s` |
@@ -42,7 +52,8 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 ## Layout
 
 ```
-cmd/jobscheduler/   server binary
+api/openapi.yaml    REST API contract
+cmd/jobscheduler/   server binary (serve, migrate, bootstrap)
 internal/           application packages (see LLD §1)
 docs/               designs, ADRs, plan
 ```

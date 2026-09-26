@@ -10,9 +10,9 @@ Builds the design in [architecture.md](architecture.md) incrementally. Each phas
 | 1 | Scaffolding | Repository layout, configuration, logging, health and readiness, process lifecycle and graceful shutdown, container image, `docker compose`, Makefile, CI | `make lint test-race build` green; the binary serves `/livez` and `/readyz` and shuts down gracefully | Done |
 | 2 | Domain core | Job and attempt state machines, retry decisions, priority selection | Exhaustive unit tests, including state-machine properties; LLD §3–§7 | Done |
 | 3 | Persistence | Schema and migrations, repositories with guarded transitions, idempotency store, time partitioning | LLD schema section; integration tests against real PostgreSQL, including concurrent-transition races | Done |
-| 4 | Job API | REST endpoints, error model, API-key auth and tenant scoping, idempotency, admission control, OpenAPI | Contract tests; cross-tenant access tests | Next |
-| 5 | Walking skeleton + load-test gate | Minimal end-to-end path (submit → claim → complete) on real PostgreSQL; k6 scenario | 5k jobs/s bursts with p99 dispatch ≤ 1 s on one primary, or the architecture is revisited | |
-| 6 | Scheduler | Materializer, promoter, cron with time zones, fixed-rate, fixed-delay, misfire and overlap policies | DST and misfire tests; no duplicate fires with several engines | |
+| 4 | Job API | REST endpoints, error model, API-key auth and tenant scoping, idempotency, admission control, OpenAPI | Contract tests; cross-tenant access tests | Done |
+| 5 | Walking skeleton + load-test gate | Minimal end-to-end path (submit → claim → complete) on real PostgreSQL; k6 scenario | 5k jobs/s bursts with p99 dispatch ≤ 1 s on one primary, or the architecture is revisited | Moved after phase 9, so it measures the real dispatch path |
+| 6 | Scheduler | Materializer, promoter, cron with time zones, fixed-rate, fixed-delay, misfire and overlap policies | DST and misfire tests; no duplicate fires with several engines | Next |
 | 7 | Coordination | Lease manager, epochs, fencing checks, singleton duties | Tests for split brain, lease expiry and handoff | |
 | 8 | Worker system | gRPC worker protocol, dispatcher (weighted priority, tenant caps), sessions, heartbeats, cancellation, worker SDK, demo worker | Worker ↔ engine contract tests; end-to-end tests | |
 | 9 | Retries and recovery | Retry integration, reaper (with warm-up), timeouts, dead-letter, re-drive, bulk operations | Recovery tests for worker crash, timeout and poison jobs | |
