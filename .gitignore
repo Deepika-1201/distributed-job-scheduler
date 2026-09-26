@@ -1,5 +1,6 @@
 /bin/
 /.tools/
+.DS_Store
 *.test
 *.out
 coverage.*
