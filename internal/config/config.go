@@ -50,6 +50,8 @@ type Engine struct {
 	WorkerToken   string
 	// NodeID identifies this process as a lease holder; unique per start.
 	NodeID string
+	// HistoryRetention is how long finished jobs and attempts are kept (NFR-9).
+	HistoryRetention time.Duration
 }
 
 type API struct {
@@ -99,10 +101,14 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if cfg.Roles.Has(RoleEngine) {
 		cfg.Engine = Engine{
-			WorkerAddr:    p.str("JS_WORKER_ADDR", ":7070"),
-			AdvertiseAddr: p.str("JS_WORKER_ADVERTISE_ADDR", ""),
-			WorkerToken:   p.required("JS_WORKER_TOKEN"),
-			NodeID:        p.str("JS_NODE_ID", defaultNodeID()),
+			WorkerAddr:       p.str("JS_WORKER_ADDR", ":7070"),
+			AdvertiseAddr:    p.str("JS_WORKER_ADVERTISE_ADDR", ""),
+			WorkerToken:      p.required("JS_WORKER_TOKEN"),
+			NodeID:           p.str("JS_NODE_ID", defaultNodeID()),
+			HistoryRetention: p.duration("JS_HISTORY_RETENTION", 30*24*time.Hour),
+		}
+		if cfg.Engine.HistoryRetention < 24*time.Hour {
+			p.fail("JS_HISTORY_RETENTION", "must be at least 24h")
 		}
 		if t := cfg.Engine.WorkerToken; t != "" && len(t) < 16 {
 			p.fail("JS_WORKER_TOKEN", "must be at least 16 characters")

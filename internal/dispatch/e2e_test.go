@@ -78,14 +78,18 @@ func (c *cluster) run(fn func(context.Context) error) {
 }
 
 // engine starts an engine node's worker server and returns its address.
-func (c *cluster) engine(node string) string {
+func (c *cluster) engine(node string, mods ...func(*dispatch.Config)) string {
 	c.t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	d, err := dispatch.New(c.store, dispatch.Config{NodeID: node, AdvertiseAddr: lis.Addr().String(), Token: token,
-		Listener: lis, RoundInterval: 20 * time.Millisecond}, slog.New(slog.DiscardHandler))
+	cfg := dispatch.Config{NodeID: node, AdvertiseAddr: lis.Addr().String(), Token: token,
+		Listener: lis, RoundInterval: 20 * time.Millisecond}
+	for _, mod := range mods {
+		mod(&cfg)
+	}
+	d, err := dispatch.New(c.store, cfg, slog.New(slog.DiscardHandler))
 	if err != nil {
 		c.t.Fatal(err)
 	}

@@ -18,12 +18,14 @@ import (
 	"jobscheduler/internal/api"
 	"jobscheduler/internal/app"
 	"jobscheduler/internal/config"
+	"jobscheduler/internal/coordination"
 	"jobscheduler/internal/dispatch"
 	"jobscheduler/internal/domain"
 	"jobscheduler/internal/health"
 	"jobscheduler/internal/httpserver"
 	"jobscheduler/internal/observability"
 	"jobscheduler/internal/persistence/postgres"
+	"jobscheduler/internal/recovery"
 	"jobscheduler/internal/scheduling"
 )
 
@@ -112,10 +114,19 @@ func serve() error {
 			return err
 		}
 		log.Info("serving workers", "addr", lis.Addr().String(), "advertise", advertise, "node_id", cfg.Engine.NodeID)
+		retention := postgres.Retention{History: cfg.Engine.HistoryRetention, Sessions: 24 * time.Hour}
+		singletons := coordination.NewManager(store, coordination.Config{
+			Name: "singleton-leases", Holder: cfg.Engine.NodeID, TTL: coordination.SingletonTTL, Margin: coordination.Margin,
+			Duties: map[string]func(context.Context){
+				"singleton:maintenance": recovery.Maintenance(store, retention, time.Hour, log),
+			},
+		}, log)
 		components = append(components,
 			scheduling.NewMaterializer(store, domain.DefaultPlanLimits, log),
 			scheduling.NewPromoter(store, log),
-			dispatcher)
+			dispatcher,
+			recovery.NewReaper(store, recovery.ReaperConfig{}, log),
+			singletons)
 	}
 	for _, c := range components {
 		if srv, ok := c.(*httpserver.Server); ok {

@@ -684,3 +684,64 @@ Every engine node runs the gRPC server, plus a pool lease manager (§11.3).
 - Store: sessions, typed claims, exact tenant caps, release.
 - Dispatcher: per-slot weighted allocation.
 - End to end: an in-process engine and SDK workers over real gRPC. Covers success, retry then success, permanent failure, cancellation delivered through heartbeats, timeout, and a worker redirected from a non-owner engine to the owner.
+
+## 13. Recovery and maintenance
+
+Implements the reaper, timeout and retention rows of HLD §14 and NFR-9.
+
+### 13.1 Reaper
+
+Every engine node runs one, every 5 s. Each step handles a batch of 100 and repeats at once while its batch is full.
+
+1. **Warm-up:** do nothing until this node has had database connectivity for one session TTL (30 s). A failed ping or step restarts the warm-up (HLD S6).
+2. **Expire sessions:** `ACTIVE` sessions whose `lease_expires_at` has passed → `EXPIRED`. Rows are locked with `SKIP LOCKED`, so reapers on different nodes share the work.
+3. **Lose orphaned attempts:** `RUNNING` jobs whose session is no longer `ACTIVE` → attempt `LOST`.
+4. **Time out overdue attempts:** `RUNNING` jobs with `attempt_deadline < now() − 30 s` → attempt `TIMED_OUT`. This is the backstop behind the worker's own deadline.
+
+- Steps 3 and 4 go through `CompleteAttempt`, so the retry rules apply (for example, dead-lettered as poison after 3 lost attempts).
+- They are fenced by attempt ID and number: a worker's late report and the reaper can't both win.
+- Jobs whose session row is missing are left to step 4.
+
+### 13.2 Maintenance
+
+A singleton duty under lease `singleton:maintenance` (§11.3). It runs when the lease is acquired and then hourly.
+
+| Task | Rule |
+|---|---|
+| Partitions | Create daily `job_history` and `attempts` partitions for today and the next 7 days. A day whose partition can't be created doesn't stop the others. |
+| History retention | Drop daily partitions whose range ended more than `JS_HISTORY_RETENTION` (30 d) ago. Delete such rows from the default partitions in batches. |
+| Idempotency keys | Delete keys past `expires_at` (24 h TTL). |
+| Schedule ledger | Delete `schedule_fires` rows older than the history retention. Cursors only move forward, so old fire times are never materialized again. |
+| Worker sessions | Delete `CLOSED` and `EXPIRED` sessions a day after they ended. |
+
+- **Why partitions are created ahead:** so the default partitions stay empty. Rows that land there anyway, such as rows written before maintenance first ran, are removed by retention rather than moved. Moving them would lock the default partition.
+- **Locking:** dropping a partition takes an `ACCESS EXCLUSIVE` lock on its parent. It runs with `lock_timeout = 1s` and retries on the next run, so history inserts queue for at most 1 s.
+- **Audit log:** not touched. The runtime may only insert into it, and its retention of at least 1 year is a separate privileged job (HLD §16).
+- **Deletes** run in batches of 10,000, at most 100 batches per table per run.
+
+### 13.3 Bulk operations
+
+| Endpoint | Role | Behavior |
+|---|---|---|
+| `POST /v1/operations` | operator | Body `{"kind": "cancel" \| "redrive", "filter": {...}}` → `202` with the operation |
+| `GET /v1/operations/{id}` | viewer | State and counts |
+
+- **Filter:** the same fields as `GET /v1/jobs`: `state`, `type`, `label`, `schedule_id`. `cancel` applies to active jobs, and `redrive` to `FAILED` and `DEAD_LETTERED` jobs.
+- **Scope:** only jobs created before the operation are touched.
+- **Execution:**
+  - Any engine node claims `PENDING` or `RUNNING` operations with `SKIP LOCKED`.
+  - It processes one batch of 100 jobs per operation, oldest first, through the same guarded store methods as the single-job endpoints (`RequestCancel`, `RetryJob`).
+  - After each batch it stores a keyset cursor and the counts (`succeeded`, `skipped` for jobs no longer eligible, `failed`).
+  - The loop runs every second, which is the rate limit.
+- **Crash recovery:** a node that dies mid-batch leaves the cursor at the last completed batch, so its successor repeats at most one batch. Both actions are idempotent, but counts may then over-count by up to one batch.
+- **States:** `PENDING` → `RUNNING` → `SUCCEEDED`. `FAILED` is used when a batch errors 10 times in a row.
+
+### 13.4 Tests
+
+- **Store:**
+  - sessions expire and their attempts are lost, and those jobs are retried;
+  - overdue attempts time out, but not within the grace period;
+  - partitions are created and dropped, and expired rows are purged from every table;
+  - bulk cancel and re-drive process batches, respect their filters and resume from the cursor.
+- **Reaper:** warm-up delays expiry and restarts after a failed ping.
+- **End to end:** a worker that stops heartbeating without deregistering has its job lost, retried and completed by another worker.

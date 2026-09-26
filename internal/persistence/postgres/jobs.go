@@ -563,20 +563,38 @@ func cancelFinished(ctx context.Context, tx pgx.Tx, tenant, jobID string) (domai
 // EnsurePartitions creates daily job_history and attempts partitions for days UTC days
 // starting at from. Existing partitions are left untouched.
 func (s *Store) EnsurePartitions(ctx context.Context, from time.Time, days int) error {
+	_, err := s.ensurePartitions(ctx, from, days)
+	return err
+}
+
+// ensurePartitions returns how many partitions it created. A day that fails, for example
+// because rows for it already sit in the default partition, doesn't stop the others.
+func (s *Store) ensurePartitions(ctx context.Context, from time.Time, days int) (int, error) {
 	start := from.UTC().Truncate(24 * time.Hour)
+	created := 0
+	var errs []error
 	for i := range days {
 		lo := start.AddDate(0, 0, i)
 		hi := lo.AddDate(0, 0, 1)
 		for _, parent := range []string{"job_history", "attempts"} {
-			name := pgx.Identifier{parent + "_p" + lo.Format("20060102")}.Sanitize()
-			sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM ('%s') TO ('%s')`,
-				name, parent, lo.Format(time.RFC3339), hi.Format(time.RFC3339))
-			if _, err := s.pool.Exec(ctx, sql); err != nil {
-				return fmt.Errorf("create partition %s: %w", name, err)
+			name := parent + "_p" + lo.Format("20060102")
+			var exists bool
+			if err := s.pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, name).Scan(&exists); err != nil {
+				return created, err
 			}
+			if exists {
+				continue
+			}
+			sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM ('%s') TO ('%s')`,
+				pgx.Identifier{name}.Sanitize(), parent, lo.Format(time.RFC3339), hi.Format(time.RFC3339))
+			if _, err := s.pool.Exec(ctx, sql); err != nil {
+				errs = append(errs, fmt.Errorf("create partition %s: %w", name, err))
+				continue
+			}
+			created++
 		}
 	}
-	return nil
+	return created, errors.Join(errs...)
 }
 
 func deref(j *domain.Job) domain.Job {

@@ -125,31 +125,10 @@ func (s *Store) CloseSession(ctx context.Context, id domain.SessionID) error {
 	if tag.RowsAffected() == 0 {
 		return domain.ErrNotFound
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id, current_attempt_id, attempt_count FROM jobs
-		WHERE current_session_id = $1 AND state = 'RUNNING'`, sid)
-	if err != nil {
-		return err
-	}
-	type held struct {
-		job, attempt pgtype.UUID
-		number       int
-	}
-	orphans, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (held, error) {
-		var h held
-		return h, r.Scan(&h.job, &h.attempt, &h.number)
-	})
-	if err != nil {
-		return err
-	}
-	for _, h := range orphans {
-		_, err := s.CompleteAttempt(ctx, Completion{JobID: domain.JobID(uuidString(h.job)), AttemptID: domain.AttemptID(uuidString(h.attempt)),
-			Number: h.number, End: domain.AttemptEnd{State: domain.AttemptLost}, Error: "worker deregistered while holding the attempt",
-			Actor: domain.ActorDispatcher})
-		if err != nil && !errors.Is(err, domain.ErrStaleAttempt) {
-			return err
-		}
-	}
-	return nil
+	_, err = s.endAttempts(ctx, domain.AttemptEnd{State: domain.AttemptLost}, domain.ActorDispatcher,
+		"worker deregistered while holding the attempt",
+		`SELECT id, current_attempt_id, attempt_count FROM jobs WHERE current_session_id = $1 AND state = 'RUNNING'`, sid)
+	return err
 }
 
 // ActivePools lists the pools that have at least one live worker session.
