@@ -70,15 +70,23 @@ func newCluster(t *testing.T) *cluster {
 	return c
 }
 
-func (c *cluster) run(fn func(context.Context) error) {
+func (c *cluster) run(fn func(context.Context) error) func() {
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { _ = fn(runCtx); close(done) }()
-	c.t.Cleanup(func() { cancel(); <-done })
+	stop := func() { cancel(); <-done }
+	c.t.Cleanup(stop)
+	return stop
 }
 
 // engine starts an engine node's worker server and returns its address.
 func (c *cluster) engine(node string, mods ...func(*dispatch.Config)) string {
+	addr, _ := c.stoppableEngine(node, mods...)
+	return addr
+}
+
+// stoppableEngine starts an engine node and returns its address and a graceful stop.
+func (c *cluster) stoppableEngine(node string, mods ...func(*dispatch.Config)) (string, func()) {
 	c.t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -93,8 +101,8 @@ func (c *cluster) engine(node string, mods ...func(*dispatch.Config)) string {
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	c.run(d.Run)
-	return lis.Addr().String()
+	stop := c.run(d.Run)
+	return lis.Addr().String(), stop
 }
 
 func (c *cluster) worker(addr string, slots int, handlers map[string]workersdk.Handler) {
