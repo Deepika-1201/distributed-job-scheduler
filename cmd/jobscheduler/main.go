@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // schedules resolve IANA zones even in images without zoneinfo
 
 	"jobscheduler/internal/api"
 	"jobscheduler/internal/app"
@@ -21,6 +22,7 @@ import (
 	"jobscheduler/internal/httpserver"
 	"jobscheduler/internal/observability"
 	"jobscheduler/internal/persistence/postgres"
+	"jobscheduler/internal/scheduling"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -85,10 +87,18 @@ func serve() error {
 
 	ops := httpserver.New("ops", cfg.OpsAddr, checks.Handler(), cfg.ShutdownTimeout, log)
 	components := []app.Component{ops}
+	store := postgres.NewStore(pool)
 	if cfg.Roles.Has(config.RoleAPI) {
-		store := postgres.NewStore(pool)
-		apiServer := api.New(store, log, api.Config{TenantRateLimit: cfg.API.NodeRateLimit()})
+		apiServer := api.New(store, log, api.Config{
+			TenantRateLimit:     cfg.API.NodeRateLimit(),
+			MinScheduleInterval: cfg.API.MinScheduleInterval,
+		})
 		components = append(components, httpserver.New("api", cfg.HTTPAddr, apiServer.Handler(), cfg.ShutdownTimeout, log))
+	}
+	if cfg.Roles.Has(config.RoleEngine) {
+		components = append(components,
+			scheduling.NewMaterializer(store, domain.DefaultPlanLimits, log),
+			scheduling.NewPromoter(store, log))
 	}
 	for _, c := range components {
 		if srv, ok := c.(*httpserver.Server); ok {

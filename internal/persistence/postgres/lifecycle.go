@@ -168,6 +168,7 @@ func (s *Store) RetryJob(ctx context.Context, tenantID domain.TenantID, id domai
 type JobFilter struct {
 	State      domain.JobState
 	Type       string
+	ScheduleID domain.ScheduleID
 	LabelKey   string
 	LabelValue string
 	Limit      int
@@ -185,6 +186,7 @@ const listWhere = ` WHERE tenant_id = $1
   AND ($3::text IS NULL OR job_type = $3)
   AND ($4::jsonb IS NULL OR labels @> $4)
   AND ($5::timestamptz IS NULL OR (created_at, id) < ($5, $6::uuid))
+  AND ($8::uuid IS NULL OR schedule_id = $8)
 ORDER BY created_at DESC, id DESC
 LIMIT $7`
 
@@ -208,7 +210,15 @@ func (s *Store) ListJobs(ctx context.Context, tenantID domain.TenantID, f JobFil
 		}
 		afterTime, afterID = pgtype.Timestamptz{Time: f.After.CreatedAt, Valid: true}, &id
 	}
-	args := []any{tenant, nullText(string(f.State)), nullText(f.Type), label, afterTime, afterID, f.Limit + 1}
+	var schedule *string
+	if f.ScheduleID != "" {
+		id, ok := canonicalUUID(string(f.ScheduleID))
+		if !ok {
+			return nil, nil, nil
+		}
+		schedule = &id
+	}
+	args := []any{tenant, nullText(string(f.State)), nullText(f.Type), label, afterTime, afterID, f.Limit + 1, schedule}
 
 	var jobs []domain.Job
 	for _, src := range []struct {

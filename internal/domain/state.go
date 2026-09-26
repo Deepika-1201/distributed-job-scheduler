@@ -86,9 +86,9 @@ var jobTransitions = map[jobEdge][]Actor{
 	{StateReady, StatePaused}:           {ActorAPI},                       // T12
 	{StatePaused, StateScheduled}:       {ActorAPI},                       // T13
 	{StateScheduled, StateCancelled}:    {ActorAPI},                       // T14
-	{StateReady, StateCancelled}:        {ActorAPI},                       // T15
+	{StateReady, StateCancelled}:        {ActorAPI, ActorPromoter},        // T15
 	{StatePaused, StateCancelled}:       {ActorAPI},                       // T16
-	{StateRetryPending, StateCancelled}: {ActorAPI},                       // T17
+	{StateRetryPending, StateCancelled}: {ActorAPI, ActorPromoter},        // T17
 	{StateScheduled, StateExpired}:      {ActorPromoter, ActorDispatcher}, // T18
 	{StateReady, StateExpired}:          {ActorPromoter, ActorDispatcher}, // T19
 	{StateScheduled, StateSkipped}:      {ActorPromoter},                  // T20

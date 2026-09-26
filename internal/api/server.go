@@ -28,20 +28,26 @@ const (
 type Config struct {
 	// TenantRateLimit is each tenant's request rate on this node, per second.
 	TenantRateLimit float64
+	// MinScheduleInterval is the shortest schedule interval accepted; zero means 1 minute.
+	MinScheduleInterval time.Duration
 }
 
 type Server struct {
-	store   *postgres.Store
-	log     *slog.Logger
-	auth    *authenticator
-	limiter *rateLimiter
-	now     func() time.Time
-	mux     *http.ServeMux
-	routes  []string
+	store               *postgres.Store
+	log                 *slog.Logger
+	auth                *authenticator
+	limiter             *rateLimiter
+	now                 func() time.Time
+	mux                 *http.ServeMux
+	routes              []string
+	minScheduleInterval time.Duration
 }
 
 func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
-	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux()}
+	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux(), minScheduleInterval: cfg.MinScheduleInterval}
+	if s.minScheduleInterval <= 0 {
+		s.minScheduleInterval = time.Minute
+	}
 	s.auth = newAuthenticator(store, s.now)
 	s.limiter = newRateLimiter(cfg.TenantRateLimit, s.now)
 
@@ -59,6 +65,14 @@ func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
 	s.handle("POST /v1/jobs/{id}/resume", domain.RoleOperator, s.jobAction(store.ResumeJob))
 	s.handle("POST /v1/jobs/{id}/run", domain.RoleOperator, s.jobAction(store.RunJobNow))
 	s.handle("POST /v1/jobs/{id}/retry", domain.RoleOperator, s.jobAction(store.RetryJob))
+
+	s.handle("POST /v1/schedules", domain.RoleOperator, s.createSchedule)
+	s.handle("GET /v1/schedules", domain.RoleViewer, s.listSchedules)
+	s.handle("GET /v1/schedules/{id}", domain.RoleViewer, s.getSchedule)
+	s.handle("PATCH /v1/schedules/{id}", domain.RoleOperator, s.patchSchedule)
+	s.handle("DELETE /v1/schedules/{id}", domain.RoleOperator, s.deleteSchedule)
+	s.handle("POST /v1/schedules/{id}/pause", domain.RoleOperator, s.scheduleAction(store.PauseSchedule))
+	s.handle("POST /v1/schedules/{id}/resume", domain.RoleOperator, s.scheduleAction(store.ResumeSchedule))
 
 	s.handle("POST /v1/api-keys", domain.RoleAdmin, s.createAPIKey)
 	s.handle("DELETE /v1/api-keys/{id}", domain.RoleAdmin, s.revokeAPIKey)

@@ -234,7 +234,7 @@ WITH picked AS (
     SELECT id FROM jobs
     WHERE state = 'READY' AND pool = $1 AND priority = $2
       AND NOT (tenant_id = ANY ($3::uuid[]))
-      AND (start_deadline IS NULL OR start_deadline > now())
+      AND (start_deadline IS NULL OR start_deadline > now() OR attempt_count > 0)
     ORDER BY run_at, id
     LIMIT $4
     FOR UPDATE SKIP LOCKED
@@ -421,35 +421,47 @@ type terminal struct {
 	BudgetLost int
 }
 
-var moveToHistorySQL = func() string {
-	overrides := map[string]string{
-		"state":       "$3::text",
-		"budget_lost": "$4::integer",
-		"last_error":  "COALESCE($5::text, last_error)",
-		"updated_at":  "now()",
-	}
+var moveToHistorySQL = moveSQL("id = $1 AND state = $2", map[string]string{
+	"state":       "$3::text",
+	"budget_lost": "$4::integer",
+	"last_error":  "COALESCE($5::text, last_error)",
+}, "$6::text, $7::json", historyColumns)
+
+// moveSQL builds a statement that deletes the active jobs matching where and inserts them
+// into job_history with the overridden columns; tail supplies the reason and result.
+func moveSQL(where string, overrides map[string]string, tail, returning string) string {
 	values := make([]string, len(jobColumns))
 	for i, c := range jobColumns {
 		values[i] = c
 		if o, ok := overrides[c]; ok {
 			values[i] = o
+		} else if c == "updated_at" {
+			values[i] = "now()"
 		}
 	}
-	return `WITH moved AS (DELETE FROM jobs WHERE id = $1 AND state = $2 RETURNING *)
+	return `WITH moved AS (DELETE FROM jobs WHERE ` + where + ` RETURNING *)
 INSERT INTO job_history (` + strings.Join(jobColumns, ", ") + `, finished_at, reason, result)
-SELECT ` + strings.Join(values, ", ") + `, now(), $6::text, $7::json FROM moved
-RETURNING ` + historyColumns
-}()
+SELECT ` + strings.Join(values, ", ") + `, now(), ` + tail + ` FROM moved
+RETURNING ` + returning
+}
 
 // moveToHistory deletes the job from jobs if it is still in state from, and records it in
-// job_history with the terminal outcome, in one statement.
+// job_history with the terminal outcome, in one statement. A fixed-delay schedule's next
+// fire is set in the same transaction.
 func moveToHistory(ctx context.Context, tx pgx.Tx, jobID string, from domain.JobState, t terminal) (domain.Job, error) {
 	job, err := scanJob(tx.QueryRow(ctx, moveToHistorySQL, jobID, string(from), string(t.State), t.BudgetLost,
 		nullText(t.Error), nullText(string(t.Reason)), t.Result))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Job{}, fmt.Errorf("job %s left state %s concurrently", jobID, from)
 	}
-	return job, err
+	if err != nil || job.ScheduleID == "" {
+		return job, err
+	}
+	id, err := uuid.Parse(string(job.ScheduleID))
+	if err != nil {
+		return job, err
+	}
+	return job, advanceFixedDelay(ctx, tx, []pgtype.UUID{{Bytes: id, Valid: true}})
 }
 
 // RequestCancel cancels a job that hasn't started, or flags a running job so its worker is

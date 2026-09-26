@@ -2,7 +2,7 @@
 
 A distributed job scheduling and execution platform: durable jobs that run now, later or on a recurring schedule, with at-least-once execution, retries, priorities and fair sharing across tenants, on a horizontally scalable worker fleet.
 
-**Status:** phases 1–4 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence and the REST API ([OpenAPI](api/openapi.yaml)). The scheduler, worker system and recovery are in progress.
+**Status:** phases 1–4 and 6 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)) and the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies). Coordination, the worker system and recovery are in progress.
 
 ## Documentation
 
@@ -33,6 +33,8 @@ Create a tenant and its first admin key, then call the API:
 export KEY=jsk_...
 curl -X POST localhost:8080/v1/job-types -H "Authorization: Bearer $KEY" -d '{"name": "email.send"}'
 curl -X POST localhost:8080/v1/jobs -H "Authorization: Bearer $KEY" -d '{"type": "email.send", "payload": {"to": "a@example.com"}}'
+curl -X POST localhost:8080/v1/schedules -H "Authorization: Bearer $KEY" \
+  -d '{"name": "nightly", "job_type": "email.send", "trigger": {"kind": "cron", "cron": "30 2 * * *", "time_zone": "Europe/Paris"}}'
 ```
 
 ## Configuration
@@ -45,6 +47,7 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 | `JS_ROLES` | `api,engine` |
 | `JS_HTTP_ADDR` / `JS_OPS_ADDR` | `:8080` / `:9090` |
 | `JS_TENANT_RATE_LIMIT` / `JS_API_REPLICAS` | `500` / `1` |
+| `JS_MIN_SCHEDULE_INTERVAL` | `1m` |
 | `JS_DB_MAX_CONNS` | `10` |
 | `JS_LOG_LEVEL` / `JS_LOG_FORMAT` | `info` / `json` |
 | `JS_SHUTDOWN_DELAY` / `JS_SHUTDOWN_TIMEOUT` | `0s` / `30s` |

@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"jobscheduler/internal/domain"
 	"jobscheduler/internal/persistence/postgres"
@@ -196,16 +199,9 @@ func (s *Server) resolveSubmission(r *http.Request, p principal, req submitJobRe
 		payload = []byte("{}")
 	}
 	if len(payload) > maxPayloadBytes {
-		return postgres.NewJob{}, newError(http.StatusRequestEntityTooLarge, "payload_too_large", "payload exceeds %d bytes", maxPayloadBytes)
+		return postgres.NewJob{}, errPayloadTooLarge
 	}
-	if len(req.Labels) > 16 {
-		fe.add("labels", "at most 16 labels")
-	}
-	for k, v := range req.Labels {
-		if k == "" || len(k) > 64 || len(v) > 256 {
-			fe.add("labels", "keys must be 1-64 characters and values at most 256")
-		}
-	}
+	validateLabels(req.Labels, fe)
 	if len(req.DedupeKey) > 255 {
 		fe.add("dedupe_key", "must be at most 255 characters")
 	}
@@ -294,12 +290,60 @@ type cursorBody struct {
 	ID        string    `json:"id"`
 }
 
+var errPayloadTooLarge = newError(http.StatusRequestEntityTooLarge, "payload_too_large", "payload exceeds %d bytes", maxPayloadBytes)
+
+func validateLabels(labels map[string]string, fe fieldErrors) {
+	if len(labels) > 16 {
+		fe.add("labels", "at most 16 labels")
+	}
+	for k, v := range labels {
+		if k == "" || len(k) > 64 || len(v) > 256 {
+			fe.add("labels", "keys must be 1-64 characters and values at most 256")
+		}
+	}
+}
+
+// parsePage reads the limit (default 50) and opaque cursor query parameters.
+func parsePage(q url.Values, fe fieldErrors) (int, *cursorBody) {
+	limit := 50
+	if l := q.Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err != nil || n < 1 || n > 200 {
+			fe.add("limit", "must be between 1 and 200")
+		} else {
+			limit = n
+		}
+	}
+	c := q.Get("cursor")
+	if c == "" {
+		return limit, nil
+	}
+	var cb cursorBody
+	raw, err := base64.RawURLEncoding.DecodeString(c)
+	if err == nil {
+		err = json.Unmarshal(raw, &cb)
+	}
+	if err != nil || cb.ID == "" {
+		fe.add("cursor", "invalid cursor")
+	}
+	return limit, &cb
+}
+
+func encodeCursor(createdAt time.Time, id string) string {
+	raw, _ := json.Marshal(cursorBody{CreatedAt: createdAt, ID: id})
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, p principal) error {
 	q := r.URL.Query()
 	fe := fieldErrors{}
-	f := postgres.JobFilter{State: domain.JobState(q.Get("state")), Type: q.Get("type"), Limit: 50}
+	f := postgres.JobFilter{State: domain.JobState(q.Get("state")), Type: q.Get("type"), ScheduleID: domain.ScheduleID(q.Get("schedule_id"))}
 	if f.State != "" && !f.State.Valid() {
 		fe.add("state", "unknown state")
+	}
+	if f.ScheduleID != "" {
+		if _, err := uuid.Parse(string(f.ScheduleID)); err != nil {
+			fe.add("schedule_id", "must be a UUID")
+		}
 	}
 	if label := q.Get("label"); label != "" {
 		k, v, ok := strings.Cut(label, ":")
@@ -308,23 +352,9 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, p principal) e
 		}
 		f.LabelKey, f.LabelValue = k, v
 	}
-	if l := q.Get("limit"); l != "" {
-		if n, err := strconv.Atoi(l); err != nil || n < 1 || n > 200 {
-			fe.add("limit", "must be between 1 and 200")
-		} else {
-			f.Limit = n
-		}
-	}
-	if c := q.Get("cursor"); c != "" {
-		var cb cursorBody
-		raw, err := base64.RawURLEncoding.DecodeString(c)
-		if err == nil {
-			err = json.Unmarshal(raw, &cb)
-		}
-		if err != nil || cb.ID == "" {
-			fe.add("cursor", "invalid cursor")
-		}
-		f.After = &postgres.JobCursor{CreatedAt: cb.CreatedAt, ID: domain.JobID(cb.ID)}
+	var after *cursorBody
+	if f.Limit, after = parsePage(q, fe); after != nil {
+		f.After = &postgres.JobCursor{CreatedAt: after.CreatedAt, ID: domain.JobID(after.ID)}
 	}
 	if err := fe.err(); err != nil {
 		return err
@@ -339,8 +369,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, p principal) e
 		resp.Items = append(resp.Items, toJobResponse(j))
 	}
 	if next != nil {
-		raw, _ := json.Marshal(cursorBody{CreatedAt: next.CreatedAt, ID: string(next.ID)})
-		resp.NextCursor = base64.RawURLEncoding.EncodeToString(raw)
+		resp.NextCursor = encodeCursor(next.CreatedAt, string(next.ID))
 	}
 	writeJSON(w, http.StatusOK, resp)
 	return nil

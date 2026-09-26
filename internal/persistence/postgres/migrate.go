@@ -37,7 +37,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) error {
 	}
 	results, err := provider.Up(ctx)
 	for _, r := range results {
-		log.Info("migration applied", "version", r.Source.Version, "file", r.Source.Path, "duration", r.Duration.String())
+		log.Info("migration applied", "migration", r.Source.Version, "file", r.Source.Path, "duration", r.Duration.String())
 	}
 	if err != nil {
 		return fmt.Errorf("apply migrations: %w", err)

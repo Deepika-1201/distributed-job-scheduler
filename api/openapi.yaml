@@ -58,6 +58,7 @@ paths:
       parameters:
         - { name: state, in: query, schema: { $ref: "#/components/schemas/JobState" } }
         - { name: type, in: query, schema: { type: string } }
+        - { name: schedule_id, in: query, schema: { type: string, format: uuid } }
         - { name: label, in: query, description: "key:value", schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
         - { name: cursor, in: query, schema: { type: string } }
@@ -94,6 +95,50 @@ paths:
     parameters: [{ $ref: "#/components/parameters/JobID" }]
     post: { summary: Retry a FAILED or DEAD_LETTERED job (operator), responses: { "200": { $ref: "#/components/responses/Job" }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Conflict" } } }
 
+  /v1/schedules:
+    post:
+      summary: Create a schedule (operator)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ScheduleRequest" } } } }
+      responses:
+        "201": { $ref: "#/components/responses/Schedule" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+    get:
+      summary: List schedules, newest first
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ScheduleList" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /v1/schedules/{id}:
+    parameters: [{ $ref: "#/components/parameters/ScheduleID" }]
+    get:
+      summary: Get a schedule, with its next five fire times
+      responses:
+        "200": { $ref: "#/components/responses/Schedule" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Update a schedule (operator); omitted fields are unchanged, null clears start_at, end_at, max_runs and priority
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ScheduleRequest" } } } }
+      responses:
+        "200": { $ref: "#/components/responses/Schedule" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a schedule (operator); jobs that already ran stay in history
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/schedules/{id}/pause:
+    parameters: [{ $ref: "#/components/parameters/ScheduleID" }]
+    post: { summary: Pause an active schedule (operator), responses: { "200": { $ref: "#/components/responses/Schedule" }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Error" } } }
+  /v1/schedules/{id}/resume:
+    parameters: [{ $ref: "#/components/parameters/ScheduleID" }]
+    post: { summary: Resume a paused schedule (operator); missed fires follow the misfire policy, responses: { "200": { $ref: "#/components/responses/Schedule" }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Error" } } }
+
   /v1/api-keys:
     post:
       summary: Create an API key (admin); the key is returned only once
@@ -114,6 +159,7 @@ components:
     apiKey: { type: http, scheme: bearer, description: "jsk_<prefix>_<secret>" }
   parameters:
     JobID: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    ScheduleID: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
   responses:
     Error:
       description: Error (see LLD §9.2 for codes)
@@ -121,6 +167,9 @@ components:
     Job:
       description: The job after the operation
       content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } }
+    Schedule:
+      description: The schedule
+      content: { application/json: { schema: { $ref: "#/components/schemas/Schedule" } } }
     Conflict:
       description: Not allowed from the job's current state (details.state holds it)
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
@@ -244,6 +293,60 @@ components:
       type: object
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/Job" } }
+        next_cursor: { type: string }
+    Trigger:
+      type: object
+      required: [kind]
+      description: "Cron (5 or 6 fields, or a macro such as @daily) in an IANA time zone, or a fixed-rate or fixed-delay interval (LLD §10.2)"
+      properties:
+        kind: { type: string, enum: [cron, fixed_rate, fixed_delay] }
+        cron: { type: string, examples: ["0 2 * * *", "*/15 * * * *", "@hourly"] }
+        time_zone: { type: string, default: UTC, examples: [Europe/Paris] }
+        interval: { $ref: "#/components/schemas/Duration" }
+    ScheduleRequest:
+      type: object
+      description: name, job_type and trigger are required on create; job_type cannot change
+      properties:
+        name: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,99}$" }
+        job_type: { type: string }
+        payload: { description: "Any JSON value up to 64 KiB; defaults to {}" }
+        labels: { type: object, additionalProperties: { type: string }, maxProperties: 16 }
+        priority: { oneOf: [{ $ref: "#/components/schemas/Priority" }, { type: "null" }], description: "null uses the job type's default" }
+        trigger: { $ref: "#/components/schemas/Trigger" }
+        start_at: { type: [string, "null"], format: date-time }
+        end_at: { type: [string, "null"], format: date-time }
+        max_runs: { type: [integer, "null"], minimum: 1 }
+        jitter: { $ref: "#/components/schemas/Duration" }
+        misfire_policy: { type: string, enum: [fire_once, skip, fire_all], default: fire_once }
+        overlap_policy: { type: string, enum: [skip, buffer_one, allow, cancel_previous], default: skip }
+    Schedule:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        job_type: { type: string }
+        payload: {}
+        labels: { type: object, additionalProperties: { type: string } }
+        priority: { oneOf: [{ $ref: "#/components/schemas/Priority" }, { type: "null" }] }
+        trigger: { $ref: "#/components/schemas/Trigger" }
+        start_at: { type: [string, "null"], format: date-time }
+        end_at: { type: [string, "null"], format: date-time }
+        max_runs: { type: [integer, "null"] }
+        jitter: { $ref: "#/components/schemas/Duration" }
+        misfire_policy: { type: string }
+        overlap_policy: { type: string }
+        state: { type: string, enum: [ACTIVE, PAUSED, COMPLETED] }
+        next_fire_at: { type: [string, "null"], format: date-time }
+        last_fire_at: { type: [string, "null"], format: date-time }
+        fire_count: { type: integer }
+        upcoming: { type: array, items: { type: string, format: date-time }, description: Next five fire times (single reads only) }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ScheduleList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Schedule" } }
         next_cursor: { type: string }
     APIKeyRequest:
       type: object

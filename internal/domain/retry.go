@@ -163,6 +163,9 @@ const (
 	ReasonRetryableError    Reason = "RETRYABLE_ERROR"
 	ReasonTimedOut          Reason = "TIMED_OUT"
 	ReasonLost              Reason = "LOST"
+	ReasonStartDeadline     Reason = "START_DEADLINE_EXCEEDED"
+	ReasonOverlap           Reason = "OVERLAP"    // skipped by the schedule's overlap policy
+	ReasonSuperseded        Reason = "SUPERSEDED" // cancelled by a newer run (cancel_previous)
 )
 
 var retryReasons = map[AttemptState]Reason{

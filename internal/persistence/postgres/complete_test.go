@@ -28,7 +28,7 @@ func (f *fixture) complete(c Completion) CompletionResult {
 	return res
 }
 
-// makeReady stands in for the promoter, which arrives in phase 6.
+// makeReady makes a job READY directly, without going through the promoter.
 func (f *fixture) makeReady(id domain.JobID) {
 	f.exec(`UPDATE jobs SET state = 'READY', run_at = now(), ready_at = now() WHERE id = $1`, string(id))
 }

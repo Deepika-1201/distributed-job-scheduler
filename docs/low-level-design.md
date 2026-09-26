@@ -145,9 +145,9 @@ This implements the lifecycle from [HLD §10.2](architecture.md#102-job-lifecycl
 | T12 | `READY` | `PAUSED` | api | Hold |
 | T13 | `PAUSED` | `SCHEDULED` | api | Resume, or run now |
 | T14 | `SCHEDULED` | `CANCELLED` | api | Cancel, or withdrawn by a schedule change |
-| T15 | `READY` | `CANCELLED` | api | Cancel |
+| T15 | `READY` | `CANCELLED` | api, promoter | Cancel; superseded by a newer run (`cancel_previous`) |
 | T16 | `PAUSED` | `CANCELLED` | api | Cancel |
-| T17 | `RETRY_PENDING` | `CANCELLED` | api | Cancel |
+| T17 | `RETRY_PENDING` | `CANCELLED` | api, promoter | Cancel; superseded by a newer run (`cancel_previous`) |
 | T18 | `SCHEDULED` | `EXPIRED` | promoter, dispatcher | Start deadline passed |
 | T19 | `READY` | `EXPIRED` | promoter, dispatcher | Start deadline passed |
 | T20 | `SCHEDULED` | `SKIPPED` | promoter | Overlap policy |
@@ -439,3 +439,116 @@ Any other starting state gets `409` with the current state. Each operation write
 - `GET /v1/jobs` can filter by `state`, `type` and `label=key:value`.
 - It reads `jobs` and `job_history` with the same filter, ordered by `(created_at, id)` descending. It fetches `limit + 1` rows from each, merges them, and encodes the cursor from the last row returned.
 - An active-state filter reads only `jobs`, and a terminal-state filter reads only `job_history`.
+
+## 10. Scheduler
+
+Implements HLD §11 and [ADR-001](decisions/ADR-001-scheduler-architecture.md). Trigger evaluation and fire planning are pure functions in `domain`. The store runs them inside row-locked transactions, and the `scheduling` package drives the loops.
+
+### 10.1 Tables (phase 6 migration)
+
+| Table | Purpose | Key points |
+|---|---|---|
+| `schedules` | Definition and cursor | `trigger_kind` is `cron`, `fixed_rate` or `fixed_delay`. `next_fire_at` is the cursor; it is `NULL` when completed, or while a fixed-delay run is active. `state` is `ACTIVE`, `PAUSED`, `COMPLETED` or `DELETED` (soft delete). Names are unique per tenant among non-deleted schedules. |
+| `schedule_fires` | Ledger: one row per `(schedule_id, fire_time)` ever materialized | Primary key `(schedule_id, fire_time)` enforces I2 even after jobs move to `job_history`. Rows are deleted only when their job is withdrawn, or by retention. |
+
+Index `schedules (next_fire_at) WHERE state = 'ACTIVE'` serves the materializer. Two indexes serve the promoter: `jobs (schedule_id, fire_time) WHERE schedule_id IS NOT NULL`, for overlap checks, and `jobs (start_deadline) WHERE state IN ('SCHEDULED', 'READY') AND attempt_count = 0`, for expiry.
+
+### 10.2 Triggers
+
+- **Cron:** 5 fields (minute, hour, day of month, month, day of week) or 6 (seconds first).
+  - Syntax: `*`, `?` (same as `*`), values, ranges `a-b`, steps `*/n`, `a/n` and `a-b/n`, lists, and `JAN`–`DEC` and `SUN`–`SAT` names. Day of week 7 also means Sunday.
+  - Macros: `@yearly` (`@annually`), `@monthly`, `@weekly`, `@daily` (`@midnight`) and `@hourly`.
+  - Day matching follows Vixie cron: if both day fields are restricted, a day matches when *either* does; otherwise both must.
+  - `L`, `W` and `#` are rejected. Expressions that never fire within 10 years are rejected.
+  - **DST:** a local time skipped by a DST gap fires once at the gap's end (a 02:30 job fires at 03:00 on a spring-forward day). Fire times inside the gap collapse into that one instant, so an every-15-minutes cron keeps firing every 15 real minutes.
+  - **Repeated times:** a time repeated by a DST overlap fires only at its first occurrence. An every-15-minutes cron therefore pauses during the repeated hour. Fixed-rate triggers are the choice for real-time intervals.
+- **Fixed-rate:** fire times are `anchor + k × interval` for k ≥ 0. The anchor is `start_at`, or the creation time, so the first run is immediate when there is no `start_at`.
+- **Fixed-delay:** the first fire is at `start_at`, or now. Each run's terminal transition sets `next_fire_at = now() + interval` in the same transaction.
+- **Validation:**
+  - Intervals, and the smallest gap among a cron's next 100 fires, must be at least the minimum interval (`JS_MIN_SCHEDULE_INTERVAL`, 60 s).
+  - `jitter` ≤ 1 h, and it must not exceed a fixed-rate interval.
+  - `end_at` must be after `start_at`, and `max_runs` ≥ 1.
+  - The time zone must be an IANA name; `UTC` is the default.
+
+### 10.3 Materializer
+
+Every engine node runs one. Each second (and again at once when a batch was full), it runs a transaction:
+
+1. Lock up to 100 due schedules: `state = 'ACTIVE' AND next_fire_at <= now() + lookahead` (2 min), ordered by `next_fire_at`, `FOR UPDATE SKIP LOCKED`.
+2. For each schedule, `domain.PlanFires` returns the fire times to create, the new cursor, and whether the schedule is now completed:
+   - **Misfire:** a cursor older than `now() − 1 min` is a misfire.
+     - `fire_once`: one fire at the latest missed time.
+     - `skip`: no missed fire; the cursor jumps to the first fire after now.
+     - `fire_all`: every missed time, at most the 100 most recent.
+     - Fixed-delay schedules always fire once.
+   - **Window:** then every fire time up to `now() + lookahead`, at most 1,000 per pass.
+   - **Limits:** fire times after `end_at`, or beyond `max_runs` (counting `fire_count`), are not created, and the schedule becomes `COMPLETED`.
+   - **Fixed-delay:** plans at most one fire, then sets the cursor to `NULL` (waiting).
+3. Insert the planned fires into `schedule_fires` with `ON CONFLICT DO NOTHING`. Insert a job only for each fire actually recorded:
+   - `state = SCHEDULED`, with `run_at = fire_time + jitter`;
+   - `created_by = schedule:<id>`;
+   - pool, timeout, retry policy and at-most-once come from the job type at materialization time;
+   - priority comes from the schedule, else the job type.
+4. Update `next_fire_at`, `fire_count`, `last_fire_at` and `state`.
+
+- **Jitter** is FNV-1a of `(schedule_id, fire_time)` modulo the jitter window, so re-materializing yields the same `run_at`.
+- A **disabled job type** pauses its schedules implicitly. They are filtered out of the batch query, so they never fill batches. Once the type is re-enabled, their stale cursors are handled as misfires.
+- The materializer always creates `SCHEDULED` jobs (T1), even when they are already due. The promoter owns every move to `READY`.
+
+### 10.4 Promoter and overlap policies
+
+Every engine node runs one every 250 ms, and continuously while any step fills its batch. Each step is its own transaction over rows locked with `SKIP LOCKED`.
+
+| Step | Rows (batch) | Effect |
+|---|---|---|
+| Expire | Due `SCHEDULED` jobs and `READY` jobs whose `start_deadline` has passed and that have never started (1,000) | → `EXPIRED` (T18, T19) |
+| Promote | Due `RETRY_PENDING` jobs, and due `SCHEDULED` jobs without a schedule (1,000) | → `READY` (T3, T4) in one `UPDATE` |
+| Schedule jobs | Due `SCHEDULED` jobs with a schedule (500), with each schedule's overlap policy | See below |
+
+For schedule jobs, "an earlier run is active" means an earlier-fire job of the same schedule is `READY`, `RUNNING` or `RETRY_PENDING`. The batch is processed in `(schedule_id, fire_time)` order, and jobs promoted earlier in the batch count as active.
+
+| Overlap policy | Earlier run active | Otherwise |
+|---|---|---|
+| `skip` (default) | → `SKIPPED` (T20) | → `READY` |
+| `allow` | → `READY` | → `READY` |
+| `buffer_one` | Stay `SCHEDULED` with `run_at` pushed 5 s ahead, and re-checked then. If an earlier job of the schedule is already waiting, → `SKIPPED`. | → `READY` |
+| `cancel_previous` | Cancel the earlier runs, then → `READY`. A running one gets `cancel_requested_at` (ends `CANCELLED` via its worker). A `READY` or `RETRY_PENDING` one → `CANCELLED` (T15, T17 by the promoter). | → `READY` |
+
+- **Buffer one:** re-checking after 5 s bounds the cost of waiting jobs and keeps them from filling every batch. The price is up to 5 s extra delay after the earlier run finishes.
+- **Retries:** jobs that have already started are never expired by `start_deadline`; their overall `deadline` governs retries. The claim query skips the start deadline for them too.
+- **Terminal transitions:** every move of a schedule's job to a terminal state also advances its fixed-delay schedule. That includes completion, cancel, expire and skip.
+
+### 10.5 Schedule changes
+
+- **Withdrawal** (resolves HLD open question 11):
+  - Deletes the schedule's `SCHEDULED` jobs with `run_at > now()`, and their `schedule_fires` rows.
+  - Lowers `fire_count` by the number withdrawn and sets `next_fire_at` to the earliest withdrawn fire time.
+  - These jobs are provisional lookahead artifacts. Deleting them, rather than cancelling them, avoids flooding history with up to 2 min of cancellations per edit. It also lets the new definition re-materialize the same fire times. Audit rows record the count.
+- **Pause:** `ACTIVE` → `PAUSED`, then withdraw. **Resume:** `PAUSED` → `ACTIVE`. The materializer then treats a stale cursor as a misfire, which applies the misfire policy.
+- **Edit (`PATCH`):**
+  - Withdraw, apply the changes, and recompute the cursor from `max(now, last kept fire)`.
+  - A fixed-delay schedule waiting on a run keeps waiting.
+  - A `COMPLETED` schedule whose new limits allow more fires becomes `ACTIVE`.
+  - `job_type` cannot change.
+- **Delete:** withdraw, then `state = DELETED` and cursor `NULL`. The name becomes reusable. Reads return `404`, and the jobs already run stay in history.
+
+### 10.6 API
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `POST /v1/schedules` | operator | `201`; duplicate name → `409` |
+| `GET /v1/schedules`, `GET /v1/schedules/{id}` | viewer | Single reads include the next 5 fire times (`upcoming`) |
+| `PATCH /v1/schedules/{id}` | operator | Fields as in create, except `job_type` |
+| `DELETE /v1/schedules/{id}` | operator | `204` |
+| `POST /v1/schedules/{id}/pause`, `/resume` | operator | `409` from the wrong state |
+
+- The trigger is an object: `{"kind": "cron", "cron": "0 2 * * *", "time_zone": "Europe/Paris"}`, `{"kind": "fixed_rate", "interval": "10m"}` or `{"kind": "fixed_delay", "interval": "5m"}`.
+- `GET /v1/jobs` gains a `schedule_id` filter.
+- Schedule management needs operator because a schedule creates load indefinitely.
+- All schedule mutations are audited.
+
+### 10.7 Tests
+
+- **Cron:** parsing and field semantics, plus DST gaps and overlaps in `America/New_York` and `Europe/London`, and a zone with a 30-minute shift (`Australia/Lord_Howe`).
+- **`PlanFires`:** window, limits, each misfire policy, fixed-delay, jitter determinism.
+- **Store:** idempotent re-materialization through the ledger; concurrent materializers never fire twice; each overlap policy; expiry; withdrawal on pause and edit; fixed-delay chaining across completion.

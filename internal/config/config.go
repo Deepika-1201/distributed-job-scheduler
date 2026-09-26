@@ -42,6 +42,8 @@ type API struct {
 	// TenantRateLimit is each tenant's request budget per second across all api replicas.
 	TenantRateLimit float64
 	Replicas        int
+	// MinScheduleInterval is the shortest interval a schedule may fire at (LLD §10.2).
+	MinScheduleInterval time.Duration
 }
 
 // NodeRateLimit is the share of the tenant rate limit enforced by one api replica.
@@ -66,8 +68,9 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		HTTPAddr: p.str("JS_HTTP_ADDR", ":8080"),
 		OpsAddr:  p.str("JS_OPS_ADDR", ":9090"),
 		API: API{
-			TenantRateLimit: p.floatInRange("JS_TENANT_RATE_LIMIT", 500, 1, 1e6),
-			Replicas:        p.intInRange("JS_API_REPLICAS", 1, 1, 1000),
+			TenantRateLimit:     p.floatInRange("JS_TENANT_RATE_LIMIT", 500, 1, 1e6),
+			Replicas:            p.intInRange("JS_API_REPLICAS", 1, 1, 1000),
+			MinScheduleInterval: p.duration("JS_MIN_SCHEDULE_INTERVAL", time.Minute),
 		},
 		Database: Database{
 			URL:      p.required("JS_DATABASE_URL"),
@@ -82,6 +85,9 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if cfg.HTTPAddr == cfg.OpsAddr {
 		p.fail("JS_HTTP_ADDR", "must differ from JS_OPS_ADDR")
+	}
+	if cfg.API.MinScheduleInterval < time.Second {
+		p.fail("JS_MIN_SCHEDULE_INTERVAL", "must be at least 1s")
 	}
 	if err := errors.Join(p.errs...); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration:\n%w", err)
