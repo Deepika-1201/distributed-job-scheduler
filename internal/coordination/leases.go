@@ -54,6 +54,7 @@ type Manager struct {
 	mu     sync.Mutex
 	held   map[string]*heldLease
 	duties sync.WaitGroup
+	wake   chan struct{}
 }
 
 type heldLease struct {
@@ -71,10 +72,19 @@ func NewManager(store Store, cfg Config, log *slog.Logger) *Manager {
 		}
 		cfg.Wanted = func() []string { return names }
 	}
-	return &Manager{cfg: cfg, store: store, log: log.With("component", cfg.Name), now: time.Now, held: map[string]*heldLease{}}
+	return &Manager{cfg: cfg, store: store, log: log.With("component", cfg.Name), now: time.Now, held: map[string]*heldLease{},
+		wake: make(chan struct{}, 1)}
 }
 
 func (m *Manager) Name() string { return m.cfg.Name }
+
+// Poke runs a renew-and-acquire round soon, e.g. after the wanted leases changed.
+func (m *Manager) Poke() {
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
 
 // Lease returns the named lease while it is held and locally valid.
 func (m *Manager) Lease(name string) (postgres.Lease, bool) {
@@ -100,6 +110,8 @@ func (m *Manager) Run(ctx context.Context) error {
 			m.duties.Wait()
 			return nil
 		case <-timer.C:
+		case <-m.wake:
+			timer.Stop()
 		}
 		round, cancel := context.WithTimeout(ctx, interval)
 		m.renew(round)

@@ -7,11 +7,52 @@ import (
 	"time"
 )
 
+const testToken = "0123456789abcdef-worker"
+
+// env serves m as the environment, with a valid JS_WORKER_TOKEN unless m sets one.
 func env(m map[string]string) func(string) (string, bool) {
 	return func(k string) (string, bool) {
 		v, ok := m[k]
+		if !ok && k == "JS_WORKER_TOKEN" {
+			return testToken, true
+		}
 		return v, ok
 	}
+}
+
+func TestLoadEngineSettings(t *testing.T) {
+	cfg, err := Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := cfg.Engine; e.WorkerAddr != ":7070" || e.WorkerToken != testToken || e.NodeID == "" {
+		t.Errorf("Engine = %+v", e)
+	}
+	if again, _ := Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs"})); again.Engine.NodeID == cfg.Engine.NodeID {
+		t.Error("node IDs repeat across starts; a restarted node would reuse its predecessor's leases")
+	}
+	_, err = Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs", "JS_WORKER_TOKEN": "short",
+		"JS_WORKER_ADDR": ":8080"}))
+	for _, want := range []string{"JS_WORKER_TOKEN: must be at least 16", "JS_WORKER_ADDR: must differ"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+	if _, err := Load(func(k string) (string, bool) {
+		return map[string]string{"JS_DATABASE_URL": "postgres://db/jobs", "JS_ROLES": "api"}[k], k != "JS_WORKER_TOKEN"
+	}); err != nil {
+		t.Errorf("api-only process required a worker token: %v", err)
+	}
+	if strings.Contains(fmtErr(Load(env(map[string]string{"JS_WORKER_TOKEN": "short-secret"}))), "short-secret") {
+		t.Error("error echoes the worker token")
+	}
+}
+
+func fmtErr(_ Config, err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func TestLoadDefaults(t *testing.T) {

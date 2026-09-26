@@ -5,6 +5,7 @@ x-app: &app
   image: jobscheduler:dev
   environment: &app-env
     JS_DATABASE_URL: postgres://jobs:jobs@postgres:5432/jobs?sslmode=disable
+    JS_WORKER_TOKEN: local-dev-worker-token # local development only
     JS_LOG_FORMAT: text
 
 services:
@@ -36,8 +37,11 @@ services:
     environment:
       <<: *app-env
       JS_ROLES: api,engine
+      JS_WORKER_ADVERTISE_ADDR: localhost:7070
     ports:
+      - "8080:8080"
       - "9090:9090"
+      - "7070:7070"
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -229,19 +229,33 @@ type ClaimRequest struct {
 	Priority    domain.Priority
 	Limit       int
 	SessionID   domain.SessionID
+	JobTypes    []string          // the worker's capabilities; empty means any type
 	SkipTenants []domain.TenantID // tenants at their concurrency cap
+	// Allowances caps how many jobs this claim may take per listed tenant (LLD §12.3).
+	Allowances map[domain.TenantID]int
 }
 
+// claimSQL over-fetches candidates when allowances apply, then keeps at most each capped
+// tenant's allowance. Candidates locked but not picked are released at commit.
 var claimSQL = `
-WITH picked AS (
-    SELECT id FROM jobs
+WITH candidates AS MATERIALIZED (
+    SELECT id, tenant_id, run_at FROM jobs
     WHERE EXISTS (` + fenceSQL("$6", "$7", "$8") + `)
       AND state = 'READY' AND pool = $1 AND priority = $2
       AND NOT (tenant_id = ANY ($3::uuid[]))
+      AND ($9::text[] IS NULL OR job_type = ANY ($9::text[]))
       AND (start_deadline IS NULL OR start_deadline > now() OR attempt_count > 0)
     ORDER BY run_at, id
-    LIMIT $4
+    LIMIT $10
     FOR UPDATE SKIP LOCKED
+), ranked AS (
+    SELECT c.id, c.run_at, a.allowance,
+        row_number() OVER (PARTITION BY c.tenant_id ORDER BY c.run_at, c.id) AS n
+    FROM candidates c LEFT JOIN unnest($11::uuid[], $12::integer[]) AS a (tenant_id, allowance) ON a.tenant_id = c.tenant_id
+), picked AS (
+    SELECT id FROM ranked WHERE allowance IS NULL OR n <= allowance
+    ORDER BY run_at, id
+    LIMIT $4
 )
 UPDATE jobs AS j SET
     state = 'RUNNING',
@@ -271,14 +285,25 @@ func (s *Store) ClaimReady(ctx context.Context, req ClaimRequest) ([]domain.Job,
 	if !ok {
 		return nil, fmt.Errorf("invalid session id %q", req.SessionID)
 	}
-	skip := make([]pgtype.UUID, 0, len(req.SkipTenants))
-	for _, t := range req.SkipTenants {
+	skip := uuidArray(req.SkipTenants)
+	var jobTypes []string
+	if len(req.JobTypes) > 0 {
+		jobTypes = req.JobTypes
+	}
+	fetch := req.Limit
+	allowTenants := make([]pgtype.UUID, 0, len(req.Allowances))
+	allowances := make([]int32, 0, len(req.Allowances))
+	for t, n := range req.Allowances {
 		if id, err := uuid.Parse(string(t)); err == nil {
-			skip = append(skip, pgtype.UUID{Bytes: id, Valid: true})
+			allowTenants = append(allowTenants, pgtype.UUID{Bytes: id, Valid: true})
+			allowances = append(allowances, int32(max(n, 0)))
 		}
 	}
+	if len(allowances) > 0 {
+		fetch = min(req.Limit*4, max(req.Limit, 1000))
+	}
 	rows, err := s.pool.Query(ctx, claimSQL+activeColumnsJ, req.Pool, int16(req.Priority), skip, req.Limit, session,
-		req.Lease.Name, req.Lease.Holder, req.Lease.Epoch)
+		req.Lease.Name, req.Lease.Holder, req.Lease.Epoch, jobTypes, fetch, allowTenants, allowances)
 	if err != nil {
 		return nil, err
 	}

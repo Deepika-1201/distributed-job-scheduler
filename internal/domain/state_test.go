@@ -37,6 +37,7 @@ var expectedJobTransitions = []struct {
 	{"T20", StateScheduled, StateSkipped, []Actor{ActorPromoter}},
 	{"T21", StateFailed, StateReady, []Actor{ActorAPI}},
 	{"T22", StateDeadLettered, StateReady, []Actor{ActorAPI}},
+	{"T23", StateRunning, StateReady, []Actor{ActorDispatcher}},
 }
 
 func TestJobTransitionsMatchLLD(t *testing.T) {

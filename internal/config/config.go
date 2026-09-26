@@ -2,9 +2,12 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,10 +35,21 @@ type Config struct {
 	HTTPAddr        string
 	OpsAddr         string
 	API             API
+	Engine          Engine
 	Database        Database
 	Log             Log
 	ShutdownDelay   time.Duration
 	ShutdownTimeout time.Duration
+}
+
+// Engine configures the worker protocol served by engine nodes (LLD §12).
+type Engine struct {
+	WorkerAddr string // listen address
+	// AdvertiseAddr is how workers reach this node when redirected to it.
+	AdvertiseAddr string
+	WorkerToken   string
+	// NodeID identifies this process as a lease holder; unique per start.
+	NodeID string
 }
 
 type API struct {
@@ -83,6 +97,20 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		ShutdownDelay:   p.duration("JS_SHUTDOWN_DELAY", 0),
 		ShutdownTimeout: p.duration("JS_SHUTDOWN_TIMEOUT", 30*time.Second),
 	}
+	if cfg.Roles.Has(RoleEngine) {
+		cfg.Engine = Engine{
+			WorkerAddr:    p.str("JS_WORKER_ADDR", ":7070"),
+			AdvertiseAddr: p.str("JS_WORKER_ADVERTISE_ADDR", ""),
+			WorkerToken:   p.required("JS_WORKER_TOKEN"),
+			NodeID:        p.str("JS_NODE_ID", defaultNodeID()),
+		}
+		if t := cfg.Engine.WorkerToken; t != "" && len(t) < 16 {
+			p.fail("JS_WORKER_TOKEN", "must be at least 16 characters")
+		}
+		if slices.Contains([]string{cfg.HTTPAddr, cfg.OpsAddr}, cfg.Engine.WorkerAddr) {
+			p.fail("JS_WORKER_ADDR", "must differ from JS_HTTP_ADDR and JS_OPS_ADDR")
+		}
+	}
 	if cfg.HTTPAddr == cfg.OpsAddr {
 		p.fail("JS_HTTP_ADDR", "must differ from JS_OPS_ADDR")
 	}
@@ -98,6 +126,18 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 type parser struct {
 	lookup func(string) (string, bool)
 	errs   []error
+}
+
+// defaultNodeID is the hostname plus a random suffix, so a restarted process never reuses
+// its predecessor's lease identity.
+func defaultNodeID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "node"
+	}
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return host + "-" + hex.EncodeToString(b[:])
 }
 
 func (p *parser) get(key string) (string, bool) {

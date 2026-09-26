@@ -1,0 +1,132 @@
+syntax = "proto3";
+
+// Worker protocol between workers and engine nodes (LLD §12.1). Fields are only ever added;
+// a breaking change means a v2 package served side by side.
+package jobscheduler.worker.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "jobscheduler/pkg/workerpb;workerpb";
+
+// WorkerService requires "authorization: Bearer <worker token>" metadata on every call.
+service WorkerService {
+  // Register opens a session with a pool. Any engine node serves it.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // Poll long-polls for assignments. Only the pool owner assigns work; other nodes answer
+  // with redirect_address, or retry_after while the pool has no owner.
+  rpc Poll(PollRequest) returns (PollResponse);
+  // Heartbeat renews the session and reports running attempts. Any engine node serves it.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  // Complete reports an attempt's outcome, fenced by attempt ID and number.
+  rpc Complete(CompleteRequest) returns (CompleteResponse);
+  // Deregister closes a drained session.
+  rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+}
+
+message RegisterRequest {
+  string pool = 1;
+  // Job types this worker can run; empty means every type in the pool.
+  repeated string job_types = 2;
+  int32 slots = 3;
+  map<string, string> labels = 4;
+  // Identifies the process to operators, e.g. host and PID.
+  string worker_id = 5;
+  string runtime_version = 6;
+}
+
+message RegisterResponse {
+  string session_id = 1;
+  google.protobuf.Duration lease_ttl = 2;
+  google.protobuf.Duration heartbeat_interval = 3;
+}
+
+message PollRequest {
+  string session_id = 1;
+  int32 max_jobs = 2;
+  // How long to wait for work; the server caps it at 30 s.
+  google.protobuf.Duration wait = 3;
+}
+
+message PollResponse {
+  repeated Assignment assignments = 1;
+  // Poll the pool owner at this address instead.
+  string redirect_address = 2;
+  // The pool has no owner yet; poll again after this delay.
+  google.protobuf.Duration retry_after = 3;
+}
+
+message Assignment {
+  // The job ID is also the handler's idempotency key.
+  string job_id = 1;
+  string attempt_id = 2;
+  // The attempt number is the fencing token.
+  int64 attempt_number = 3;
+  string job_type = 4;
+  int32 job_type_version = 5;
+  // JSON.
+  bytes payload = 6;
+  map<string, string> labels = 7;
+  string tenant_id = 8;
+  string priority = 9;
+  // The attempt deadline on the database clock, for information.
+  google.protobuf.Timestamp deadline = 10;
+  // The attempt timeout, which the worker enforces from receipt on its monotonic clock.
+  google.protobuf.Duration timeout = 11;
+  string schedule_id = 12;
+  google.protobuf.Timestamp fire_time = 13;
+}
+
+message HeartbeatRequest {
+  string session_id = 1;
+  repeated RunningAttempt running = 2;
+}
+
+message RunningAttempt {
+  string job_id = 1;
+  string attempt_id = 2;
+  int64 attempt_number = 3;
+}
+
+message HeartbeatResponse {
+  // Attempts whose job was cancelled: cancel the handler and report OUTCOME_CANCELLED.
+  repeated string cancel = 1;
+  // Attempts that are no longer current: stop them and drop their results.
+  repeated string stale = 2;
+}
+
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  OUTCOME_SUCCEEDED = 1;
+  OUTCOME_FAILED = 2;
+  OUTCOME_TIMED_OUT = 3;
+  OUTCOME_CANCELLED = 4;
+}
+
+message CompleteRequest {
+  string session_id = 1;
+  string job_id = 2;
+  string attempt_id = 3;
+  int64 attempt_number = 4;
+  Outcome outcome = 5;
+  // For OUTCOME_FAILED: whether the job may be retried.
+  bool retryable = 6;
+  // For retryable failures: the handler's suggested delay before the next attempt.
+  google.protobuf.Duration retry_after = 7;
+  string error = 8;
+  // For OUTCOME_SUCCEEDED: an optional JSON result.
+  bytes result = 9;
+}
+
+message CompleteResponse {
+  // The job's state after the report.
+  string job_state = 1;
+  // The report repeated one already recorded.
+  bool replayed = 2;
+}
+
+message DeregisterRequest {
+  string session_id = 1;
+}
+
+message DeregisterResponse {}

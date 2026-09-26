@@ -94,6 +94,7 @@ var jobTransitions = map[jobEdge][]Actor{
 	{StateScheduled, StateSkipped}:      {ActorPromoter},                  // T20
 	{StateFailed, StateReady}:           {ActorAPI},                       // T21
 	{StateDeadLettered, StateReady}:     {ActorAPI},                       // T22
+	{StateRunning, StateReady}:          {ActorDispatcher},                // T23 release before delivery
 }
 
 // ValidateJobTransition returns nil if actor may move a job from one state to another,

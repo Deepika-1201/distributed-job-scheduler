@@ -153,6 +153,7 @@ This implements the lifecycle from [HLD §10.2](architecture.md#102-job-lifecycl
 | T20 | `SCHEDULED` | `SKIPPED` | promoter | Overlap policy |
 | T21 | `FAILED` | `READY` | api | Manual retry (resets the budget) |
 | T22 | `DEAD_LETTERED` | `READY` | api | Re-drive (resets the budget) |
+| T23 | `RUNNING` | `READY` | dispatcher | Release of an assignment that was never delivered or never started (§12.3); the budget is refunded |
 
 **Properties verified by tests**
 - Every state is reachable from (new).
@@ -595,3 +596,89 @@ One manager per TTL class: pools at 10 s, singletons at 30 s. Each runs a loop e
 - Store: acquire, conflict, takeover with epoch + 1 after expiry, stale renewal rejected, release enabling immediate takeover, exactly one winner among concurrent acquirers.
 - Claims with a stale epoch fail with `ErrLeaseLost`.
 - Manager: handoff on shutdown, and self-fencing when renewals fail (database partition) followed by takeover on another node.
+
+## 12. Worker system
+
+Implements HLD §12 and [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.md). Resolves HLD open questions 7 and 8.
+
+### 12.1 Protocol
+
+- **Service:** gRPC service `jobscheduler.worker.v1.WorkerService` ([proto](../proto/jobscheduler/worker/v1/worker.proto)). The generated code in `pkg/workerpb` is committed; `make proto` regenerates it.
+- **Calls:** all unary, and `Poll` is a long-poll. Unary calls pass through any HTTP/2 load balancer and are simple to retry.
+- **Versioning:** fields are only ever added. A breaking change means a `v2` package served side by side.
+- **Authentication:** `authorization: Bearer <JS_WORKER_TOKEN>`, compared in constant time. Per-pool tokens and TLS come with phase 12.
+
+| RPC | Served by | Behavior |
+|---|---|---|
+| `Register(pool, job_types, slots, labels, worker_id, runtime_version)` | any engine node | Inserts a `worker_sessions` row with `lease_expires_at = now() + 30 s`. Empty `job_types` means all types. Returns `session_id`, lease TTL and heartbeat interval (5 s). |
+| `Poll(session_id, max_jobs, wait)` | the pool owner | Blocks up to `wait` (≤ 30 s) for at most `max_jobs` assignments. A non-owner answers at once with `redirect_address` from the pool lease; with no owner yet it returns `retry_after`. |
+| `Heartbeat(session_id, running[])` | any engine node | Extends the session lease. Replies with `cancel[]` (running attempts whose job has `cancel_requested_at`) and `stale[]` (reported attempts that aren't current: stop them and drop their results). An expired or closed session → `NOT_FOUND`, and the worker re-registers. |
+| `Complete(job_id, attempt_id, attempt_number, outcome, …)` | any engine node | `CompleteAttempt`, guarded by attempt ID and fencing token. A replay is a no-op success; a stale attempt → `FAILED_PRECONDITION`. |
+| `Deregister(session_id)` | any engine node | Marks the session `CLOSED` after draining. |
+
+**Redirects (open question 8):**
+
+- The worker keeps one connection to its configured address for `Register`, `Heartbeat`, `Complete` and `Deregister`, and a second one for `Poll`.
+- On a redirect it re-dials the poll connection to the owner.
+- If the owner is unreachable, it falls back to the configured address with exponential backoff (0.5 s doubling to 10 s, full jitter).
+
+### 12.2 Sessions (phase 8 migration)
+
+- **`worker_sessions`:** `id`, `pool`, `worker_id`, `job_types text[]`, `slots`, `labels`, `runtime_version`, `state` (`ACTIVE`, `CLOSED`, `EXPIRED`), `created_at`, `heartbeat_at`, `lease_expires_at`, `closed_at`.
+- **`tenants.max_running`:** optional per-tenant cap on running jobs across pools; `NULL` means unlimited. It is set by SQL until quotas get an API in phase 12.
+- **Index:** `jobs (tenant_id) WHERE state = 'RUNNING'` serves cap counting.
+- **Heartbeats** update the session row directly: one write per worker every 5 s, 200 writes/s for 1,000 workers. Batching renewals per engine (HLD §12.2) is a phase 14 optimization.
+
+### 12.3 Dispatcher
+
+Every engine node runs the gRPC server, plus a pool lease manager (§11.3).
+
+- **Wanted leases:** every pool with an active session, refreshed every 3 s. Whichever node acquires a pool's lease first becomes its dispatcher.
+- **Waiters:** each `Poll` on the owner becomes a waiter in the pool's FIFO queue.
+- **Rounds:** the pool loop runs one when a waiter arrives, and every 100 ms while waiters remain. Each round:
+  1. Reads `READY` counts per priority for the pool, in one indexed `GROUP BY`.
+  2. Reads the running counts of capped tenants, when any tenant has a cap. Caps are refreshed every 10 s.
+  3. For each waiter, in FIFO order:
+     - Allocates its free slots one at a time with the pool's smooth weighted round-robin selector over the classes with work (§7). This makes the 8:4:2:1 shares hold per job, not per batch.
+     - Claims each class's share with `ClaimReady`: fenced by the pool lease, filtered by the waiter's job types, and skipping tenants at their cap.
+     - Fills slots left over from classes that ran dry from any other class with work, in urgency order.
+- **Exact tenant caps:** the claim over-fetches candidates. `row_number() OVER (PARTITION BY tenant_id)` then limits each capped tenant to its remaining allowance, in the same statement. Rows locked but not picked are released at commit.
+- **Commit before send:** a waiter gets its jobs only after the claim commits. If the waiter has gone (timeout or client disconnect) by delivery time, its jobs are **released** (T23).
+- **Losing the lease** (`ErrLeaseLost`, or `OnLost`) stops the pool loop. Its waiters return empty, and their next poll is redirected.
+
+**T23 (`RUNNING` → `READY`, dispatcher): release of an undelivered assignment.**
+
+- Guarded by the attempt's ID.
+- `budget_attempts` goes back down, so the attempt doesn't count against the retry budget.
+- `attempt_count` stays, so fencing tokens remain monotonic. No attempt row is written, because the attempt never ran.
+- **Heartbeat reconciliation:** attempts current for a session but missing from its heartbeat for over 15 s (three heartbeats) are released the same way. This catches responses lost after the handler returned.
+
+### 12.4 Worker SDK (`pkg/workersdk`)
+
+- `Run(ctx, Config)` registers, then runs three loops: poll, heartbeat and completion.
+- **Handlers** are registered per job type, and those types are the worker's capabilities. A handler gets a `Job` with its ID (the idempotency key), attempt number (the fencing token), payload, labels and deadline.
+- **Outcome mapping:**
+
+  | Handler result | Reported as |
+  |---|---|
+  | Success | `SUCCEEDED` |
+  | `workersdk.Permanent(err)` | Non-retryable failure |
+  | `workersdk.RetryAfter(err, d)` | Retryable failure, with a hint |
+  | Any other error, or a panic | Retryable failure |
+  | Deadline exceeded | `TIMED_OUT` |
+  | Cancelled by a cancel request | `CANCELLED` |
+
+- **Deadlines:** the attempt timeout is enforced locally on the monotonic clock, starting when the assignment is received.
+- **Completions** retry with backoff until accepted, rejected as stale, or 10 minutes pass.
+- **Self-fencing:** if no heartbeat succeeds for `lease TTL − 5 s` (25 s), the worker cancels every handler, drops their results and re-registers.
+- **Drain** (context cancelled):
+  1. Stop polling.
+  2. Wait up to `DrainTimeout` (30 s) for running handlers.
+  3. Cancel the rest; they are reported as retryable failures ("worker shutting down").
+  4. `Deregister`.
+
+### 12.5 Tests
+
+- Store: sessions, typed claims, exact tenant caps, release.
+- Dispatcher: per-slot weighted allocation.
+- End to end: an in-process engine and SDK workers over real gRPC. Covers success, retry then success, permanent failure, cancellation delivered through heartbeats, timeout, and a worker redirected from a non-owner engine to the owner.

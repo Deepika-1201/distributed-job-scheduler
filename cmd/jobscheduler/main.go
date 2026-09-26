@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"jobscheduler/internal/api"
 	"jobscheduler/internal/app"
 	"jobscheduler/internal/config"
+	"jobscheduler/internal/dispatch"
 	"jobscheduler/internal/domain"
 	"jobscheduler/internal/health"
 	"jobscheduler/internal/httpserver"
@@ -96,9 +98,24 @@ func serve() error {
 		components = append(components, httpserver.New("api", cfg.HTTPAddr, apiServer.Handler(), cfg.ShutdownTimeout, log))
 	}
 	if cfg.Roles.Has(config.RoleEngine) {
+		lis, err := net.Listen("tcp", cfg.Engine.WorkerAddr)
+		if err != nil {
+			return fmt.Errorf("listen for workers on %s: %w", cfg.Engine.WorkerAddr, err)
+		}
+		advertise := cfg.Engine.AdvertiseAddr
+		if advertise == "" {
+			advertise = lis.Addr().String()
+		}
+		dispatcher, err := dispatch.New(store, dispatch.Config{NodeID: cfg.Engine.NodeID, AdvertiseAddr: advertise,
+			Token: cfg.Engine.WorkerToken, Listener: lis}, log)
+		if err != nil {
+			return err
+		}
+		log.Info("serving workers", "addr", lis.Addr().String(), "advertise", advertise, "node_id", cfg.Engine.NodeID)
 		components = append(components,
 			scheduling.NewMaterializer(store, domain.DefaultPlanLimits, log),
-			scheduling.NewPromoter(store, log))
+			scheduling.NewPromoter(store, log),
+			dispatcher)
 	}
 	for _, c := range components {
 		if srv, ok := c.(*httpserver.Server); ok {
