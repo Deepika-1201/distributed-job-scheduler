@@ -210,7 +210,7 @@ func TestPromoteDueAndExpireOverdue(t *testing.T) {
 			t.Errorf("expired job reason %q", got.Reason)
 		}
 	}
-	claimed, err := f.store.ClaimReady(ctx, ClaimRequest{Pool: "default", Priority: domain.PriorityLow, Limit: 1, SessionID: "0191f000-0000-7000-8000-000000000001"})
+	claimed, err := f.store.ClaimReady(ctx, ClaimRequest{Lease: f.poolLease(), Pool: "default", Priority: domain.PriorityLow, Limit: 1, SessionID: "0191f000-0000-7000-8000-000000000001"})
 	if err != nil || len(claimed) != 1 {
 		t.Errorf("retried job past its start deadline was not claimable: %v, %d", err, len(claimed))
 	}

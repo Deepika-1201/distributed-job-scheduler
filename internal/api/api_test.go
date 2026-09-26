@@ -343,7 +343,11 @@ func TestLifecycleOperations(t *testing.T) {
 	// Dead-letter a job through the store, then retry it through the API.
 	dead := e.call("POST", "/v1/jobs", e.admin, `{"type": "email.send", "priority": "LOW", "retry_policy": {"max_attempts": 1, "max_lost_attempts": 1}}`).
 		want(http.StatusCreated).str("id")
-	claimed, err := e.store.ClaimReady(ctx, postgres.ClaimRequest{Pool: "default", Priority: domain.PriorityLow, Limit: 1,
+	lease, _, err := e.store.AcquireLease(ctx, postgres.PoolLeaseName("default"), "test-node", "", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := e.store.ClaimReady(ctx, postgres.ClaimRequest{Lease: lease, Pool: "default", Priority: domain.PriorityLow, Limit: 1,
 		SessionID: "0191f000-0000-7000-8000-000000000001"})
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: %v, %d jobs", err, len(claimed))

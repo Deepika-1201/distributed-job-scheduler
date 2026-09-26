@@ -11,4 +11,6 @@ var (
 	ErrStaleAttempt          = errors.New("stale attempt")
 	ErrIdempotencyKeyReused  = errors.New("idempotency key reused with a different request")
 	ErrIdempotencyInProgress = errors.New("a request with this idempotency key is still in progress")
+	// ErrLeaseLost reports that a node no longer holds a lease it acted under, e.g. after a takeover.
+	ErrLeaseLost = errors.New("lease lost")
 )

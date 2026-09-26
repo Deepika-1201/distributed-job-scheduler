@@ -38,6 +38,21 @@ type fixture struct {
 	store  *Store
 	pool   *pgxpool.Pool
 	tenant domain.TenantID
+	lease  *Lease
+}
+
+// poolLease returns the fixture's lease on pool "default", acquiring it on first use. Call
+// it before starting goroutines that claim.
+func (f *fixture) poolLease() Lease {
+	f.t.Helper()
+	if f.lease == nil {
+		l, ok, err := f.store.AcquireLease(ctx, PoolLeaseName("default"), "test-node", "", time.Minute)
+		if err != nil || !ok {
+			f.t.Fatalf("AcquireLease: %v, acquired %v", err, ok)
+		}
+		f.lease = &l
+	}
+	return *f.lease
 }
 
 // newFixture returns a store on a fresh database with one tenant and job type "email.send".

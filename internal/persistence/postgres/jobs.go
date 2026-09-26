@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -220,8 +221,10 @@ func getJobByID(ctx context.Context, tx pgx.Tx, id string) (domain.Job, error) {
 	return job, err
 }
 
-// ClaimRequest asks for up to Limit ready jobs from one pool and priority class.
+// ClaimRequest asks for up to Limit ready jobs from one pool and priority class, on behalf
+// of the pool's dispatcher, which must hold the pool's lease.
 type ClaimRequest struct {
+	Lease       Lease
 	Pool        string
 	Priority    domain.Priority
 	Limit       int
@@ -229,10 +232,11 @@ type ClaimRequest struct {
 	SkipTenants []domain.TenantID // tenants at their concurrency cap
 }
 
-const claimSQL = `
+var claimSQL = `
 WITH picked AS (
     SELECT id FROM jobs
-    WHERE state = 'READY' AND pool = $1 AND priority = $2
+    WHERE EXISTS (` + fenceSQL("$6", "$7", "$8") + `)
+      AND state = 'READY' AND pool = $1 AND priority = $2
       AND NOT (tenant_id = ANY ($3::uuid[]))
       AND (start_deadline IS NULL OR start_deadline > now() OR attempt_count > 0)
     ORDER BY run_at, id
@@ -254,10 +258,14 @@ WHERE j.id = picked.id
 RETURNING `
 
 // ClaimReady moves up to Limit READY jobs to RUNNING, each under a new attempt. Rows locked
-// by concurrent claimers or cancellations are skipped, so no job is claimed twice.
+// by concurrent claimers or cancellations are skipped, so no job is claimed twice. The claim
+// is fenced by the pool lease: it returns domain.ErrLeaseLost once the lease changed hands.
 func (s *Store) ClaimReady(ctx context.Context, req ClaimRequest) ([]domain.Job, error) {
 	if err := domain.ValidateJobTransition(domain.StateReady, domain.StateRunning, domain.ActorDispatcher); err != nil {
 		return nil, err
+	}
+	if req.Lease.Name != PoolLeaseName(req.Pool) {
+		return nil, fmt.Errorf("claiming from pool %q requires lease %q, not %q", req.Pool, PoolLeaseName(req.Pool), req.Lease.Name)
 	}
 	session, ok := canonicalUUID(string(req.SessionID))
 	if !ok {
@@ -269,13 +277,20 @@ func (s *Store) ClaimReady(ctx context.Context, req ClaimRequest) ([]domain.Job,
 			skip = append(skip, pgtype.UUID{Bytes: id, Valid: true})
 		}
 	}
-	rows, err := s.pool.Query(ctx, claimSQL+activeColumnsJ, req.Pool, int16(req.Priority), skip, req.Limit, session)
+	rows, err := s.pool.Query(ctx, claimSQL+activeColumnsJ, req.Pool, int16(req.Priority), skip, req.Limit, session,
+		req.Lease.Name, req.Lease.Holder, req.Lease.Epoch)
 	if err != nil {
 		return nil, err
 	}
 	jobs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (domain.Job, error) { return scanJob(r) })
 	if err != nil {
 		return nil, err
+	}
+	if len(jobs) == 0 {
+		// Nothing claimed: an empty queue, or the fence failed.
+		if held, err := holdsLease(ctx, s.pool, req.Lease); err != nil || !held {
+			return nil, cmp.Or(err, domain.ErrLeaseLost)
+		}
 	}
 	slices.SortFunc(jobs, func(a, b domain.Job) int {
 		if c := a.RunAt.Compare(b.RunAt); c != 0 {
@@ -332,7 +347,7 @@ func (s *Store) CompleteAttempt(ctx context.Context, c Completion) (CompletionRe
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if err != nil || !holdsLease(job, c.Number, attemptID) {
+		if err != nil || !attemptIsCurrent(job, c.Number, attemptID) {
 			res, err = resolveUnmatchedCompletion(ctx, tx, jobID, attemptID, c)
 			return err
 		}
@@ -376,7 +391,7 @@ func (s *Store) CompleteAttempt(ctx context.Context, c Completion) (CompletionRe
 	return res, err
 }
 
-func holdsLease(j domain.Job, number int, attemptID string) bool {
+func attemptIsCurrent(j domain.Job, number int, attemptID string) bool {
 	return j.State == domain.StateRunning && j.Current != nil &&
 		j.Current.Number == number && string(j.Current.ID) == attemptID
 }

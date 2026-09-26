@@ -13,7 +13,7 @@ import (
 func (f *fixture) claim(n int) []domain.Job {
 	f.t.Helper()
 	got, err := f.store.ClaimReady(ctx, ClaimRequest{
-		Pool: "default", Priority: domain.PriorityNormal, Limit: n, SessionID: domain.SessionID(uuid.NewString()),
+		Lease: f.poolLease(), Pool: "default", Priority: domain.PriorityNormal, Limit: n, SessionID: domain.SessionID(uuid.NewString()),
 	})
 	if err != nil {
 		f.t.Fatalf("ClaimReady: %v", err)
@@ -45,7 +45,7 @@ func TestClaimReadyFiltersAndOrders(t *testing.T) {
 
 	session := domain.SessionID(uuid.NewString())
 	got, err := f.store.ClaimReady(ctx, ClaimRequest{
-		Pool: "default", Priority: domain.PriorityNormal, Limit: 10, SessionID: session,
+		Lease: f.poolLease(), Pool: "default", Priority: domain.PriorityNormal, Limit: 10, SessionID: session,
 		SkipTenants: []domain.TenantID{other},
 	})
 	if err != nil {
@@ -98,13 +98,14 @@ func TestConcurrentClaimersNeverShareAJob(t *testing.T) {
 		wg      sync.WaitGroup
 		mu      sync.Mutex
 		claimed = map[domain.JobID]int{}
+		lease   = f.poolLease()
 	)
 	for range 8 {
 		wg.Go(func() {
 			session := domain.SessionID(uuid.NewString())
 			for {
 				got, err := f.store.ClaimReady(ctx, ClaimRequest{
-					Pool: "default", Priority: domain.PriorityNormal, Limit: 7, SessionID: session,
+					Lease: lease, Pool: "default", Priority: domain.PriorityNormal, Limit: 7, SessionID: session,
 				})
 				if err != nil {
 					t.Error(err)

@@ -64,11 +64,12 @@ func TestCancelRacesWithClaim(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	lease := f.poolLease()
 	wg.Go(func() {
 		session := domain.SessionID(uuid.NewString())
 		for {
 			got, err := f.store.ClaimReady(ctx, ClaimRequest{
-				Pool: "default", Priority: domain.PriorityNormal, Limit: 5, SessionID: session,
+				Lease: lease, Pool: "default", Priority: domain.PriorityNormal, Limit: 5, SessionID: session,
 			})
 			if err != nil {
 				t.Error(err)

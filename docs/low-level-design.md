@@ -552,3 +552,46 @@ For schedule jobs, "an earlier run is active" means an earlier-fire job of the s
 - **Cron:** parsing and field semantics, plus DST gaps and overlaps in `America/New_York` and `Europe/London`, and a zone with a 30-minute shift (`Australia/Lord_Howe`).
 - **`PlanFires`:** window, limits, each misfire policy, fixed-delay, jitter determinism.
 - **Store:** idempotent re-materialization through the ledger; concurrent materializers never fire twice; each overlap policy; expiry; withdrawal on pause and edit; fixed-delay chaining across completion.
+
+## 11. Coordination
+
+Implements [ADR-005](decisions/ADR-005-distributed-locking-and-fencing.md) and [ADR-006](decisions/ADR-006-leader-election.md): long-lived ownership through lease rows, fenced by epochs.
+
+### 11.1 Table (phase 7 migration)
+
+`leases (name PK, holder, address, epoch, acquired_at, renewed_at, expires_at)`.
+
+- **Names:** `pool:<pool>` names a pool's dispatcher; `singleton:<duty>` names a singleton duty such as `singleton:maintenance`.
+- **Holder:** a node ID, unique per process start (`JS_NODE_ID`, default hostname plus a random suffix).
+- **Address:** the holder's worker-protocol address, so non-owners can redirect workers (phase 8).
+
+### 11.2 Operations
+
+| Operation | SQL shape | Outcome |
+|---|---|---|
+| Acquire | `INSERT … ON CONFLICT (name) DO UPDATE SET holder, epoch = epoch + 1, … WHERE leases.expires_at <= now()` | A row means acquired: a new lease gets epoch 1, a taken-over lease gets epoch + 1. No row means someone else holds it. |
+| Renew | `UPDATE … SET expires_at = now() + ttl WHERE name AND holder AND epoch` | No row → `ErrLeaseLost`. Renewal is allowed after expiry if nobody took the lease over, because the unchanged epoch shows nobody else acted. |
+| Release | `UPDATE … SET expires_at = now() WHERE name AND holder AND epoch` | On graceful shutdown, so another node takes over at once instead of after the TTL. |
+| Fence | `EXISTS (SELECT 1 FROM leases WHERE name AND holder AND epoch FOR SHARE)` inside the owner's write | The share lock serializes the write with a concurrent takeover (an `UPDATE`): a takeover waits for in-flight writes, and later writes see the new epoch. |
+
+- **Claims are fenced:** `ClaimReady` requires the pool lease and embeds the fence in its claim statement. When nothing is claimed, a follow-up read tells an empty queue from a lost lease and returns `ErrLeaseLost` for the latter.
+- **Completions are not fenced by the pool epoch.** The attempt's fencing token already guards them, whichever node relays them.
+
+### 11.3 Lease manager
+
+One manager per TTL class: pools at 10 s, singletons at 30 s. Each runs a loop every `ttl / 3`:
+
+1. **Self-fence:** drop any held lease whose local validity has passed and call `OnLost`. Local validity is `renewal start + ttl − margin` (2 s), measured on the monotonic clock.
+2. **Renew** held leases. `ErrLeaseLost` drops the lease and calls `OnLost`. Other errors keep it while local validity lasts, which covers a brief database blip.
+3. **Acquire** wanted leases that aren't held (the `Names` callback), then call `OnAcquired`.
+
+- `Lease(name)` returns a lease only while it is locally valid. Owners check it before every write, and the database fence catches the rest.
+- On shutdown the manager releases every lease and calls `OnLost`.
+- `RunWhileHeld(name, fn)` runs a singleton duty with a context that is cancelled when the lease is lost.
+- **Known limitation:** pools go to whichever node asks first. Balancing them across engine nodes is phase 12 work.
+
+### 11.4 Tests
+
+- Store: acquire, conflict, takeover with epoch + 1 after expiry, stale renewal rejected, release enabling immediate takeover, exactly one winner among concurrent acquirers.
+- Claims with a stale epoch fail with `ErrLeaseLost`.
+- Manager: handoff on shutdown, and self-fencing when renewals fail (database partition) followed by takeover on another node.

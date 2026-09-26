@@ -2,7 +2,7 @@
 
 A distributed job scheduling and execution platform: durable jobs that run now, later or on a recurring schedule, with at-least-once execution, retries, priorities and fair sharing across tenants, on a horizontally scalable worker fleet.
 
-**Status:** phases 1–4 and 6 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)) and the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies). Coordination, the worker system and recovery are in progress.
+**Status:** phases 1–4, 6 and 7 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies) and coordination (epoch-fenced leases with self-fencing). The worker system and recovery are in progress.
 
 ## Documentation
 
