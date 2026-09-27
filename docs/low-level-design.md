@@ -958,13 +958,14 @@ The API access log includes `trace_id` and `span_id` whenever the request has a 
 
   | Dashboard | Shows |
   |---|---|
-  | Platform overview | SLO stats (scheduling lag and dispatch latency p99, API 5xx ratio, unowned pools), throughput, rejections, retries, backlog against target, held work, lag |
-  | Pools | Per pool: backlog and target, dispatchable and held work, queue wait by priority, slots, running work by tenant, dispatch latency and scheduling lag, expiries, stale reports, owner |
-  | Tenants | Per tenant: submissions by type and priority, future work, rejections, running jobs by pool |
-  | Database and engines | Transaction time and rate by operation, connections, clock offset, pools per engine, owner changes, worker calls, runtime |
+  | [Platform overview](images/dashboards/overview.png) | SLO stats (scheduling lag and dispatch latency p99, API 5xx ratio, unowned pools), throughput, rejections, retries, backlog against target, held work, lag |
+  | [Pools](images/dashboards/pools.png) | Per pool: backlog and target, dispatchable and held work, queue wait by priority, slots, running work by tenant, dispatch latency and scheduling lag, expiries, stale reports, owner |
+  | [Tenants](images/dashboards/tenants.png) | Per tenant: submissions by type and priority, future work, rejections, running jobs by pool |
+  | [Database and engines](images/dashboards/database.png) | Transaction time and rate by operation, connections, clock offset, pools per engine, owner changes, worker calls, runtime |
 
   - Each dashboard picks its Prometheus through a data-source variable, so it works unchanged against the deployment's Prometheus.
   - CI parses every dashboard query with `promtool`.
+  - Each dashboard's name links to a screenshot from a local run with an overloaded pool, a capped tenant, a paused job type, a killed worker and an owner crash, described in the [README](../README.md#observability).
 
 ### 17.5 Tests
 

@@ -69,6 +69,14 @@ Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./
 - **Dashboards:** under `docker compose`, Grafana on `localhost:3000` has a "Job scheduler" folder with the [platform, pool, tenant, and database and engine views](deploy/grafana/dashboards).
 - **Logs:** JSON, with `trace_id` on request logs.
 
+![Platform overview dashboard](docs/images/dashboards/overview.png)
+
+*The platform overview during a 12-minute local run: an API node, two engines and three demo workers. The batch pool is kept short of workers, so it runs past its 1-minute backlog target and sheds `LOW`, then `NORMAL`, submissions. Along the way, one tenant is capped at two running jobs, another pauses a job type for three minutes, a worker is killed, and the engine that owns both pools crashes and hands them over.*
+
+| Pools (the batch pool) | Tenants | Database and engines |
+|---|---|---|
+| ![Pools dashboard](docs/images/dashboards/pools.png) | ![Tenants dashboard](docs/images/dashboards/tenants.png) | ![Database and engines dashboard](docs/images/dashboards/database.png) |
+
 ## Layout
 
 ```
