@@ -31,3 +31,18 @@ jobs:
             docker run --rm -v "$PWD/deploy/prometheus:/etc/prometheus:ro" -w /etc/prometheus \
               --entrypoint promtool prom/prometheus:v3.15.0 $args
           done
+      - name: Check every dashboard query parses
+        run: |
+          mkdir -p /tmp/dashboards
+          python3 - <<'EOF'
+          import glob, json
+          rules = []
+          for path in sorted(glob.glob("deploy/grafana/dashboards/*.json")):
+              for panel in json.load(open(path))["panels"]:
+                  for t in panel.get("targets", []):
+                      expr = t["expr"].replace("$__rate_interval", "1m").replace("$pool", ".*").replace("$tenant", ".*")
+                      rules.append({"record": "dashboard:query:%d" % len(rules), "expr": expr})
+          json.dump({"groups": [{"name": "dashboards", "rules": rules}]}, open("/tmp/dashboards/rules.json", "w"))
+          print(len(rules), "dashboard queries")
+          EOF
+          docker run --rm -v /tmp/dashboards:/d:ro --entrypoint promtool prom/prometheus:v3.15.0 check rules /d/rules.json

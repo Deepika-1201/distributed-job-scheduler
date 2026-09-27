@@ -946,6 +946,17 @@ The API access log includes `trace_id` and `span_id` whenever the request has a 
 - **`docker compose`:**
   - adds Prometheus, which scrapes the platform and loads the rules;
   - adds `grafana/otel-lgtm` for traces and Grafana, with the platform exporting traces to it.
+- **Dashboards** (HLD §17.5), in `deploy/grafana/dashboards`, provisioned into the "Job scheduler" folder with a "Platform Prometheus" data source:
+
+  | Dashboard | Shows |
+  |---|---|
+  | Platform overview | SLO stats (scheduling lag and dispatch latency p99, API 5xx ratio, unowned pools), throughput, rejections, retries, backlog against target, held work, lag |
+  | Pools | Per pool: backlog and target, dispatchable and held work, slots, running work by tenant, latency, expiries, stale reports, owner |
+  | Tenants | Per tenant: submissions by type and priority, future work, rejections, running jobs by pool |
+  | Database and engines | Transaction time and rate by operation, connections, clock offset, pools per engine, owner changes, worker calls, runtime |
+
+  - Each dashboard picks its Prometheus through a data-source variable, so it works unchanged against the deployment's Prometheus.
+  - CI parses every dashboard query with `promtool`.
 
 ### 17.5 Tests
 
@@ -960,6 +971,7 @@ The API access log includes `trace_id` and `span_id` whenever the request has a 
   - the API stores its server span as the job's `trace_parent`, and logs the caller's trace ID.
 - **Configuration:** OTLP and sampling variables are parsed and validated.
 - **Smoke test:** with the collector unreachable, the binary serves `/metrics` and exits within the flush timeout.
+- **Dashboards:** provisioned into Grafana 13.2.2 (the version in `otel-lgtm` 0.34.0) against a Prometheus scraping a running platform and demo worker; every panel query ran through Grafana without error.
 
 ## 18. Pool backlog
 

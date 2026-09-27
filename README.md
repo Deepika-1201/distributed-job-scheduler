@@ -66,6 +66,7 @@ Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./
 
 - **Metrics:** Prometheus format on the ops port (`/metrics`), with the names and labels of [HLD §17.3](docs/architecture.md#17-observability). Under `docker compose`, Prometheus runs on `localhost:9091` with the [alert rules](deploy/prometheus/alerts.yml) loaded.
 - **Traces:** OTLP to `JS_OTLP_ENDPOINT`. A job's execution trace links back to the request that submitted it. Under `docker compose`, traces go to Grafana on `localhost:3000`.
+- **Dashboards:** under `docker compose`, Grafana on `localhost:3000` has a "Job scheduler" folder with the [platform, pool, tenant, and database and engine views](deploy/grafana/dashboards).
 - **Logs:** JSON, with `trace_id` on request logs.
 
 ## Layout
@@ -74,6 +75,7 @@ Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./
 api/openapi.yaml    REST API contract
 cmd/jobscheduler/   server binary (serve, migrate, bootstrap)
 deploy/prometheus/  Prometheus configuration, alert rules and their tests
+deploy/grafana/     Grafana dashboards and provisioning
 internal/           application packages (see LLD §1)
 docs/               designs, ADRs, plan
 ```

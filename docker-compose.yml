@@ -57,13 +57,17 @@ services:
     ports:
       - "9091:9090"
 
-  # Receives traces over OTLP and serves Grafana on :3000; add http://prometheus:9090 as a
-  # Prometheus data source for the platform's metrics.
+  # Receives traces over OTLP and serves Grafana on :3000, with the platform's dashboards in
+  # the "Job scheduler" folder reading from the Prometheus above (LLD §17.4).
   otel-lgtm:
     image: grafana/otel-lgtm:0.34.0
     ports:
       - "3000:3000"
       - "4317:4317"
+    volumes:
+      - ./deploy/grafana/datasources.yaml:/otel-lgtm/grafana/conf/provisioning/datasources/jobscheduler.yaml:ro
+      - ./deploy/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/jobscheduler.yaml:ro
+      - ./deploy/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/jobscheduler:ro
 
 volumes:
   pgdata:

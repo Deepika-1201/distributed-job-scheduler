@@ -1,0 +1,10 @@
+# Mounted into grafana/otel-lgtm by docker compose (LLD §17.4).
+apiVersion: 1
+
+providers:
+  - name: "Job scheduler"
+    folder: "Job scheduler"
+    type: file
+    options:
+      path: /otel-lgtm/grafana/conf/provisioning/dashboards/jobscheduler
+      foldersFromFilesStructure: false
