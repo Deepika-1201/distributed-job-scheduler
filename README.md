@@ -53,11 +53,11 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 | `JS_WORKER_ADDR` / `JS_WORKER_ADVERTISE_ADDR` | `:7070` / the listen address |
 | `JS_NODE_ID` | hostname + random suffix |
 | `JS_HISTORY_RETENTION` | `720h` (30 days) |
-
-Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./bin/demo-worker`.
 | `JS_DB_MAX_CONNS` | `10` |
 | `JS_LOG_LEVEL` / `JS_LOG_FORMAT` | `info` / `json` |
 | `JS_SHUTDOWN_DELAY` / `JS_SHUTDOWN_TIMEOUT` | `0s` / `30s` |
+
+Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./bin/demo-worker`.
 
 ## Layout
 
