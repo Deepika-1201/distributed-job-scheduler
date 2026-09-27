@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"jobscheduler/internal/domain"
@@ -65,6 +66,8 @@ type pool struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	stopOnce sync.Once
+
+	gauges atomic.Pointer[postgres.PoolGauges] // latest sample, reported while owned
 }
 
 func newPool(d *Dispatcher, name string, l postgres.Lease, selector *domain.PrioritySelector) *pool {
@@ -198,8 +201,12 @@ func (p *pool) round() {
 			return
 		}
 		jobs, err := p.fill(lease, w, has, cs)
-		if len(jobs) > 0 && !w.deliver(jobs) {
-			p.release(jobs)
+		if len(jobs) > 0 {
+			if w.deliver(jobs) {
+				p.recordDispatch(jobs)
+			} else {
+				p.release(jobs)
+			}
 		}
 		if err != nil {
 			if !errors.Is(err, domain.ErrLeaseLost) {

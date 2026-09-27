@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"errors"
 	"math/rand/v2"
 	"strings"
@@ -33,10 +32,6 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool, rnd: rand.Float64, idempotencyTTL: 24 * time.Hour}
 }
 
-func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
-	return pgx.BeginFunc(ctx, s.pool, fn)
-}
-
 // isLockTimeout reports whether err is PostgreSQL's lock_not_available (lock_timeout expired).
 func isLockTimeout(err error) bool {
 	var pgErr *pgconn.PgError
@@ -58,7 +53,7 @@ var jobColumns = []string{
 	"priority", "payload", "labels", "dedupe_key", "correlation_id", "created_by", "request_id",
 	"run_at", "start_deadline", "deadline", "attempt_timeout_ms", "retry_policy", "at_most_once",
 	"attempt_count", "budget_attempts", "budget_lost", "budget_started_at", "cancel_requested_at",
-	"last_error", "created_at", "ready_at", "updated_at",
+	"last_error", "created_at", "ready_at", "updated_at", "trace_parent",
 }
 
 // activeColumns and historyColumns project both tables onto one column list so scanJob can
@@ -125,7 +120,7 @@ func scanJob(row pgx.Row, extra ...any) (domain.Job, error) {
 		budgetStarted, cancelRequested, readyAt   pgtype.Timestamptz
 		attemptStarted, attemptDeadline, finished pgtype.Timestamptz
 		dedupeKey, correlationID, requestID       pgtype.Text
-		lastError, reason                         pgtype.Text
+		lastError, reason, traceParent            pgtype.Text
 		state                                     string
 		priority                                  int16
 		timeoutMS                                 int64
@@ -136,7 +131,7 @@ func scanJob(row pgx.Row, extra ...any) (domain.Job, error) {
 		&priority, &j.Payload, &j.Labels, &dedupeKey, &correlationID, &j.CreatedBy, &requestID,
 		&j.RunAt, &startDeadline, &deadline, &timeoutMS, &policy, &j.AtMostOnce,
 		&j.AttemptCount, &j.Budget.Attempts, &j.Budget.Lost, &budgetStarted, &cancelRequested,
-		&lastError, &j.CreatedAt, &readyAt, &j.UpdatedAt,
+		&lastError, &j.CreatedAt, &readyAt, &j.UpdatedAt, &traceParent,
 		&attemptID, &sessionID, &attemptStarted, &attemptDeadline, &finished, &reason, &j.Result,
 	}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
@@ -152,6 +147,7 @@ func scanJob(row pgx.Row, extra ...any) (domain.Job, error) {
 	j.DedupeKey = dedupeKey.String
 	j.CorrelationID = correlationID.String
 	j.RequestID = requestID.String
+	j.TraceParent = traceParent.String
 	j.StartDeadline = startDeadline.Time
 	j.Deadline = deadline.Time
 	j.AttemptTimeout = time.Duration(timeoutMS) * time.Millisecond

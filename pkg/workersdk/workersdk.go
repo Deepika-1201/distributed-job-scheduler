@@ -18,6 +18,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc/filters"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -45,7 +52,8 @@ type Job struct {
 }
 
 // Handler runs one attempt and returns an optional JSON result. It must return promptly once
-// ctx is done: on timeout, cancellation or shutdown.
+// ctx is done: on timeout, cancellation or shutdown. ctx carries the attempt's execute span,
+// so spans the handler starts are part of the attempt's trace.
 type Handler func(ctx context.Context, job Job) (result []byte, err error)
 
 // Permanent marks an error as not worth retrying.
@@ -183,10 +191,14 @@ type worker struct {
 type attempt struct {
 	job    Job
 	cancel context.CancelCauseFunc
+	span   trace.Span
 }
 
 func (w *worker) dial(addr string) (*grpc.ClientConn, error) {
-	opts := append([]grpc.DialOption{grpc.WithUnaryInterceptor(w.withToken)}, w.cfg.DialOptions...)
+	statsHandler := otelgrpc.NewClientHandler(otelgrpc.WithFilter(filters.None(
+		filters.MethodName("Poll"), filters.MethodName("Heartbeat")))) // constant background traffic
+	opts := append([]grpc.DialOption{grpc.WithUnaryInterceptor(w.withToken), grpc.WithStatsHandler(statsHandler)},
+		w.cfg.DialOptions...)
 	if len(w.cfg.DialOptions) == 0 {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
@@ -360,21 +372,28 @@ func (w *worker) start(a *workerpb.Assignment, generation int) {
 	if a.FireTime != nil {
 		job.FireTime = a.FireTime.AsTime()
 	}
-	ctx, cancel := context.WithCancelCause(context.Background())
+	spanCtx, span := otel.Tracer(tracerName).Start(context.Background(), "execute "+job.Type,
+		trace.WithNewRoot(), trace.WithSpanKind(trace.SpanKindConsumer), trace.WithLinks(linkTo(a.TraceParent)...),
+		trace.WithAttributes(attribute.String("job.id", job.ID), attribute.Int64("job.attempt", job.Attempt),
+			attribute.String("job.type", job.Type), attribute.String("tenant.id", job.TenantID)))
+	ctx, cancel := context.WithCancelCause(spanCtx)
 	ctx, cancelTimeout := context.WithDeadline(ctx, job.Deadline)
-	att := &attempt{job: job, cancel: cancel}
+	att := &attempt{job: job, cancel: cancel, span: span}
 	w.mu.Lock()
 	if w.generation != generation {
 		w.mu.Unlock()
 		cancelTimeout()
 		cancel(errStale)
+		span.End()
 		return // assigned to a session this worker has abandoned; the engine retries it
 	}
 	w.running[job.AttemptID] = att
 	w.mu.Unlock()
 	w.handlers.Go(func() {
 		defer cancelTimeout()
+		defer span.End()
 		req := w.execute(ctx, job)
+		annotate(span, req)
 		w.finish(att, req != nil)
 		if req != nil {
 			w.complete(req, att)
@@ -428,6 +447,34 @@ func safeCall(ctx context.Context, h Handler, job Job) (result []byte, err error
 	return h(ctx, job)
 }
 
+const tracerName = "jobscheduler/workersdk"
+
+// linkTo links to the submitting request's span. It is not the parent: the job may run long
+// after the request ended, and a retry is a separate attempt (ADR-020).
+func linkTo(traceParent string) []trace.Link {
+	if traceParent == "" {
+		return nil
+	}
+	sc := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(),
+		propagation.MapCarrier{"traceparent": traceParent}))
+	if !sc.IsValid() {
+		return nil
+	}
+	return []trace.Link{{SpanContext: sc}}
+}
+
+// annotate records the attempt's outcome on its span; req is nil for a stale attempt.
+func annotate(span trace.Span, req *workerpb.CompleteRequest) {
+	if req == nil {
+		span.SetStatus(otelcodes.Error, errStale.Error())
+		return
+	}
+	span.SetAttributes(attribute.String("job.outcome", req.Outcome.String()))
+	if req.Outcome != workerpb.Outcome_OUTCOME_SUCCEEDED {
+		span.SetStatus(otelcodes.Error, req.Error)
+	}
+}
+
 // finish frees the attempt's slot. An attempt with an outcome to report keeps appearing in
 // heartbeats until the report is acknowledged, so the engine doesn't release it meanwhile.
 func (w *worker) finish(att *attempt, reporting bool) {
@@ -448,7 +495,7 @@ func (w *worker) complete(req *workerpb.CompleteRequest, att *attempt) {
 	req.SessionId, _ = w.sessionInfo()
 	deadline := time.Now().Add(completeTimeout)
 	for backoff := 200 * time.Millisecond; time.Now().Before(deadline); backoff = min(2*backoff, 5*time.Second) {
-		ctx, cancel := context.WithTimeout(w.reports, 10*time.Second)
+		ctx, cancel := context.WithTimeout(trace.ContextWithSpan(w.reports, att.span), 10*time.Second)
 		_, err := w.client.Complete(ctx, req)
 		cancel()
 		switch status.Code(err) {

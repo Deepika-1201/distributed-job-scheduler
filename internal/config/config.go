@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"slices"
 	"strconv"
@@ -38,8 +39,16 @@ type Config struct {
 	Engine          Engine
 	Database        Database
 	Log             Log
+	Telemetry       Telemetry
 	ShutdownDelay   time.Duration
 	ShutdownTimeout time.Duration
+}
+
+// Telemetry configures trace export (ADR-020); metrics are always served on the ops port.
+type Telemetry struct {
+	OTLPEndpoint string // host:port of an OTLP/gRPC collector; empty disables trace export
+	OTLPInsecure bool   // plaintext to the collector, for local stacks
+	SampleRatio  float64
 }
 
 // Engine configures the worker protocol served by engine nodes (LLD §12).
@@ -101,6 +110,11 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 			Level:  p.logLevel("JS_LOG_LEVEL", slog.LevelInfo),
 			Format: p.oneOf("JS_LOG_FORMAT", "json", "json", "text"),
 		},
+		Telemetry: Telemetry{
+			OTLPEndpoint: p.str("JS_OTLP_ENDPOINT", ""),
+			OTLPInsecure: p.oneOf("JS_OTLP_INSECURE", "false", "true", "false") == "true",
+			SampleRatio:  p.floatInRange("JS_TRACE_SAMPLE_RATIO", 1, 0, 1),
+		},
 		ShutdownDelay:   p.duration("JS_SHUTDOWN_DELAY", 0),
 		ShutdownTimeout: p.duration("JS_SHUTDOWN_TIMEOUT", 30*time.Second),
 	}
@@ -124,6 +138,11 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if cfg.HTTPAddr == cfg.OpsAddr {
 		p.fail("JS_HTTP_ADDR", "must differ from JS_OPS_ADDR")
+	}
+	if e := cfg.Telemetry.OTLPEndpoint; e != "" {
+		if host, port, err := net.SplitHostPort(e); err != nil || host == "" || port == "" {
+			p.fail("JS_OTLP_ENDPOINT", "must be host:port, got %q", e)
+		}
 	}
 	if cfg.API.MinScheduleInterval < time.Second {
 		p.fail("JS_MIN_SCHEDULE_INTERVAL", "must be at least 1s")

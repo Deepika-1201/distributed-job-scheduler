@@ -9,11 +9,17 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata" // schedules resolve IANA zones even in images without zoneinfo
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"jobscheduler/internal/api"
 	"jobscheduler/internal/app"
@@ -84,16 +90,36 @@ func serve() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	tel, err := setupTelemetry(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tel.Shutdown(flushCtx); err != nil {
+			log.Warn("flushing telemetry failed", "error", err)
+		}
+	}()
+
 	pool, err := postgres.NewPool(ctx, cfg.Database.URL, cfg.Database.MaxConns)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
+	poolGauges, err := observePool(pool, cfg.Roles)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = poolGauges.Unregister() }()
 
 	checks := health.NewRegistry(log, 2*time.Second)
 	checks.Register("postgres", pool.Ping)
 
-	ops := httpserver.New("ops", cfg.OpsAddr, checks.Handler(), cfg.ShutdownTimeout, log)
+	opsMux := http.NewServeMux()
+	opsMux.Handle("GET /metrics", tel.Metrics)
+	opsMux.Handle("/", checks.Handler())
+	ops := httpserver.New("ops", cfg.OpsAddr, opsMux, cfg.ShutdownTimeout, log)
 	components := []app.Component{ops}
 	store := postgres.NewStore(pool)
 	if cfg.Roles.Has(config.RoleAPI) {
@@ -103,6 +129,7 @@ func serve() error {
 			MinScheduleInterval: cfg.API.MinScheduleInterval,
 			ShedLowAfter:        cfg.API.ShedLowAfter,
 			ShedNormalAfter:     cfg.API.ShedNormalAfter,
+			Addr:                cfg.HTTPAddr,
 		})
 		components = append(components, httpserver.New("api", cfg.HTTPAddr, apiServer.Handler(), cfg.ShutdownTimeout, log))
 	}
@@ -152,6 +179,35 @@ func serve() error {
 	}
 	log.Info("starting")
 	return a.Run(ctx)
+}
+
+// setupTelemetry installs metrics and, when configured, trace export (ADR-020).
+func setupTelemetry(ctx context.Context, cfg config.Config, log *slog.Logger) (*observability.Telemetry, error) {
+	instance := cfg.Engine.NodeID
+	if instance == "" {
+		instance, _ = os.Hostname()
+	}
+	return observability.SetupTelemetry(ctx, observability.TelemetryConfig{
+		ServiceVersion: version, InstanceID: instance,
+		OTLPEndpoint: cfg.Telemetry.OTLPEndpoint, OTLPInsecure: cfg.Telemetry.OTLPInsecure,
+		SampleRatio: cfg.Telemetry.SampleRatio, Logger: log,
+	})
+}
+
+// observePool reports the connection pool's use, labeled with the process roles: an api
+// node and an engine node size their pools differently.
+func observePool(pool *pgxpool.Pool, roles config.Roles) (metric.Registration, error) {
+	names := make([]string, len(roles))
+	for i, r := range roles {
+		names[i] = string(r)
+	}
+	role := metric.WithAttributes(attribute.String("role", strings.Join(names, ",")))
+	return observability.Meter().RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		st := pool.Stat()
+		o.ObserveInt64(observability.DBPoolInUse, int64(st.AcquiredConns()), role)
+		o.ObserveInt64(observability.DBPoolMax, int64(st.MaxConns()), role)
+		return nil
+	}, observability.DBPoolInUse, observability.DBPoolMax)
 }
 
 func migrate() error {

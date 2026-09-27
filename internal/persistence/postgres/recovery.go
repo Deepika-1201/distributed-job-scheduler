@@ -7,8 +7,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"jobscheduler/internal/domain"
+	"jobscheduler/internal/observability"
 )
 
 // Ping checks database connectivity.
@@ -16,11 +19,22 @@ func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
 // ExpireSessions marks up to limit active sessions whose lease has passed as EXPIRED (LLD §13.1).
 func (s *Store) ExpireSessions(ctx context.Context, limit int) (int, error) {
-	tag, err := s.pool.Exec(ctx, `
+	rows, err := s.pool.Query(ctx, `
 		UPDATE worker_sessions SET state = 'EXPIRED', closed_at = now()
 		WHERE id IN (SELECT id FROM worker_sessions WHERE state = 'ACTIVE' AND lease_expires_at < now()
-		    ORDER BY lease_expires_at LIMIT $1 FOR UPDATE SKIP LOCKED)`, limit)
-	return int(tag.RowsAffected()), err
+		    ORDER BY lease_expires_at LIMIT $1 FOR UPDATE SKIP LOCKED)
+		RETURNING pool`, limit)
+	if err != nil {
+		return 0, err
+	}
+	pools, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return 0, err
+	}
+	for _, p := range pools {
+		observability.SessionsExpired.Add(ctx, 1, metric.WithAttributes(attribute.String("pool", p)))
+	}
+	return len(pools), nil
 }
 
 // LoseOrphanedAttempts ends up to limit running attempts whose session is no longer active

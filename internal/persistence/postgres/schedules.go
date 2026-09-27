@@ -10,8 +10,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"jobscheduler/internal/domain"
+	"jobscheduler/internal/observability"
 )
 
 var scheduleCols = []string{
@@ -417,6 +420,13 @@ func materialize(ctx context.Context, tx pgx.Tx, sc domain.Schedule, jt domain.J
 			return err
 		}
 		inserted = tag.RowsAffected()
+		if inserted > 0 {
+			onCommit(tx, func() {
+				observability.JobsScheduled.Add(context.Background(), inserted, metric.WithAttributes(
+					attribute.String("tenant", string(sc.TenantID)), attribute.String("type", sc.JobType),
+					attribute.String("source", "schedule")))
+			})
+		}
 		last = pgtype.Timestamptz{Time: plan.Fires[len(plan.Fires)-1], Valid: true}
 	}
 	_, err = tx.Exec(ctx, `

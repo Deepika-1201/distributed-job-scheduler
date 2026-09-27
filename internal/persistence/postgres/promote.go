@@ -21,13 +21,13 @@ var (
     WHERE state IN ('SCHEDULED', 'READY') AND attempt_count = 0 AND start_deadline <= now()
     ORDER BY start_deadline
     LIMIT $1
-    FOR UPDATE SKIP LOCKED)`, map[string]string{"state": "'EXPIRED'"}, "'"+string(domain.ReasonStartDeadline)+"', NULL::json", "schedule_id")
+    FOR UPDATE SKIP LOCKED)`, map[string]string{"state": "'EXPIRED'"}, "'"+string(domain.ReasonStartDeadline)+"', NULL::json", movedReturning)
 
 	skipSQL = moveSQL(`id = ANY ($1::uuid[]) AND state = 'SCHEDULED'`,
-		map[string]string{"state": "'SKIPPED'"}, "$2::text, NULL::json", "schedule_id")
+		map[string]string{"state": "'SKIPPED'"}, "$2::text, NULL::json", movedReturning)
 
 	supersedeSQL = moveSQL(`schedule_id = $1 AND fire_time < $2 AND state IN ('READY', 'RETRY_PENDING')`,
-		map[string]string{"state": "'CANCELLED'"}, "'"+string(domain.ReasonSuperseded)+"', NULL::json", "schedule_id")
+		map[string]string{"state": "'CANCELLED'"}, "'"+string(domain.ReasonSuperseded)+"', NULL::json", movedReturning)
 )
 
 // ExpireOverdue ends never-started jobs whose start deadline has passed (T18, T19).
@@ -39,7 +39,7 @@ func (s *Store) ExpireOverdue(ctx context.Context, limit int) (int, error) {
 	}
 	var n int
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
-		ids, err := movedScheduleIDs(tx.Query(ctx, expireSQL, limit))
+		ids, err := collectMoved(ctx, tx, expireSQL, limit)
 		n = ids.rows
 		if err != nil {
 			return err
@@ -57,7 +57,7 @@ func (s *Store) PromoteDue(ctx context.Context, limit int) (int, error) {
 			return 0, err
 		}
 	}
-	tag, err := s.pool.Exec(ctx, `
+	lags, err := readLags(s.pool.Query(ctx, `
 		UPDATE jobs SET state = 'READY', ready_at = now(), updated_at = now()
 		WHERE id IN (
 		    SELECT id FROM jobs
@@ -65,8 +65,12 @@ func (s *Store) PromoteDue(ctx context.Context, limit int) (int, error) {
 		      AND (schedule_id IS NULL OR state = 'RETRY_PENDING')
 		    ORDER BY run_at
 		    LIMIT $1
-		    FOR UPDATE SKIP LOCKED)`, limit)
-	return int(tag.RowsAffected()), err
+		    FOR UPDATE SKIP LOCKED)`+promotedReturning, limit))
+	if err != nil {
+		return 0, err
+	}
+	recordLags(lags)
+	return len(lags), nil
 }
 
 // PromoteStats counts the outcomes of one PromoteScheduled batch.
@@ -188,7 +192,7 @@ func applyOverlaps(ctx context.Context, tx pgx.Tx, d overlapDecisions) error {
 	}
 	var finished []pgtype.UUID
 	for schedule, fire := range d.cancelBefore {
-		ids, err := movedScheduleIDs(tx.Query(ctx, supersedeSQL, schedule, fire))
+		ids, err := collectMoved(ctx, tx, supersedeSQL, schedule, fire)
 		if err != nil {
 			return err
 		}
@@ -207,17 +211,19 @@ func applyOverlaps(ctx context.Context, tx pgx.Tx, d overlapDecisions) error {
 		if len(skip.ids) == 0 {
 			continue
 		}
-		ids, err := movedScheduleIDs(tx.Query(ctx, skipSQL, skip.ids, string(skip.reason)))
+		ids, err := collectMoved(ctx, tx, skipSQL, skip.ids, string(skip.reason))
 		if err != nil {
 			return err
 		}
 		finished = append(finished, ids.schedules...)
 	}
 	if len(d.promote) > 0 {
-		if _, err := tx.Exec(ctx, `UPDATE jobs SET state = 'READY', ready_at = now(), updated_at = now()
-			WHERE id = ANY ($1::uuid[])`, d.promote); err != nil {
+		lags, err := readLags(tx.Query(ctx, `UPDATE jobs SET state = 'READY', ready_at = now(), updated_at = now()
+			WHERE id = ANY ($1::uuid[])`+promotedReturning, d.promote))
+		if err != nil {
 			return err
 		}
+		onCommit(tx, func() { recordLags(lags) })
 	}
 	if len(d.buffer) > 0 {
 		if _, err := tx.Exec(ctx, `UPDATE jobs SET run_at = now() + make_interval(secs => $2), updated_at = now()
@@ -226,25 +232,4 @@ func applyOverlaps(ctx context.Context, tx pgx.Tx, d overlapDecisions) error {
 		}
 	}
 	return advanceFixedDelay(ctx, tx, finished)
-}
-
-type movedRows struct {
-	rows      int
-	schedules []pgtype.UUID
-}
-
-// movedScheduleIDs collects the schedule_id column returned by a move to history.
-func movedScheduleIDs(rows pgx.Rows, err error) (movedRows, error) {
-	if err != nil {
-		return movedRows{}, err
-	}
-	var m movedRows
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[pgtype.UUID])
-	for _, id := range ids {
-		m.rows++
-		if id.Valid {
-			m.schedules = append(m.schedules, id)
-		}
-	}
-	return m, err
 }

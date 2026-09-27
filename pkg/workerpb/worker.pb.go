@@ -376,9 +376,12 @@ type Assignment struct {
 	// The attempt deadline on the database clock, for information.
 	Deadline *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=deadline,proto3" json:"deadline,omitempty"`
 	// The attempt timeout, which the worker enforces from receipt on its monotonic clock.
-	Timeout       *durationpb.Duration   `protobuf:"bytes,11,opt,name=timeout,proto3" json:"timeout,omitempty"`
-	ScheduleId    string                 `protobuf:"bytes,12,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
-	FireTime      *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=fire_time,json=fireTime,proto3" json:"fire_time,omitempty"`
+	Timeout    *durationpb.Duration   `protobuf:"bytes,11,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	ScheduleId string                 `protobuf:"bytes,12,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	FireTime   *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=fire_time,json=fireTime,proto3" json:"fire_time,omitempty"`
+	// The W3C traceparent of the submitting request, if any. The worker links its execution
+	// span to it rather than parenting on it: the job may run long after the request ended.
+	TraceParent   string `protobuf:"bytes,14,opt,name=trace_parent,json=traceParent,proto3" json:"trace_parent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -502,6 +505,13 @@ func (x *Assignment) GetFireTime() *timestamppb.Timestamp {
 		return x.FireTime
 	}
 	return nil
+}
+
+func (x *Assignment) GetTraceParent() string {
+	if x != nil {
+		return x.TraceParent
+	}
+	return ""
 }
 
 type HeartbeatRequest struct {
@@ -954,7 +964,7 @@ const file_jobscheduler_worker_v1_worker_proto_rawDesc = "" +
 	"\x10redirect_address\x18\x02 \x01(\tR\x0fredirectAddress\x12:\n" +
 	"\vretry_after\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\n" +
 	"retryAfter\x12\x14\n" +
-	"\x05drain\x18\x04 \x01(\bR\x05drain\"\xcb\x04\n" +
+	"\x05drain\x18\x04 \x01(\bR\x05drain\"\xee\x04\n" +
 	"\n" +
 	"Assignment\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1d\n" +
@@ -972,7 +982,8 @@ const file_jobscheduler_worker_v1_worker_proto_rawDesc = "" +
 	"\atimeout\x18\v \x01(\v2\x19.google.protobuf.DurationR\atimeout\x12\x1f\n" +
 	"\vschedule_id\x18\f \x01(\tR\n" +
 	"scheduleId\x127\n" +
-	"\tfire_time\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\bfireTime\x1a9\n" +
+	"\tfire_time\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\bfireTime\x12!\n" +
+	"\ftrace_parent\x18\x0e \x01(\tR\vtraceParent\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"s\n" +

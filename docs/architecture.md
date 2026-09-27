@@ -1374,6 +1374,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-017](decisions/ADR-017-platform-administration.md) | Platform administration: platform-admin role, dispatch holds and worker drain | Accepted |
 | [ADR-018](decisions/ADR-018-quotas-and-load-shedding.md) | Tenant quotas and priority-aware load shedding | Accepted |
 | [ADR-019](decisions/ADR-019-payload-json-schema.md) | Payload validation with JSON Schema | Accepted |
+| [ADR-020](decisions/ADR-020-telemetry.md) | Telemetry: pulled metrics, linked attempt traces, owner-reported pool gauges | Accepted |
 
 ## Appendix C — Open questions for the LLD
 

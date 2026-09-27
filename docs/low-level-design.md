@@ -104,11 +104,14 @@ If a component fails, shutdown starts immediately at step 2, skipping the delay.
 | Variable | Default | Meaning |
 |---|---|---|
 | `JS_ROLES` | `api,engine` | Comma-separated roles to run |
-| `JS_OPS_ADDR` | `:9090` | Health (and later metrics) listener |
+| `JS_OPS_ADDR` | `:9090` | Health and metrics (`/metrics`) listener |
 | `JS_DATABASE_URL` | required | PostgreSQL connection string |
 | `JS_DB_MAX_CONNS` | `10` | Pool size, 1–1000 |
 | `JS_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 | `JS_LOG_FORMAT` | `json` | `json` or `text` |
+| `JS_OTLP_ENDPOINT` | empty | `host:port` of an OTLP/gRPC collector; empty turns trace export off (§17.1) |
+| `JS_OTLP_INSECURE` | `false` | Plaintext to the collector, for local stacks |
+| `JS_TRACE_SAMPLE_RATIO` | `1` | Share of root traces sampled, 0–1; child spans follow their parent |
 | `JS_SHUTDOWN_DELAY` | `0s` | Time to keep serving after a signal while readiness fails; set to about 5 s behind a load balancer |
 | `JS_SHUTDOWN_TIMEOUT` | `30s` | Maximum time for each component to stop |
 
@@ -861,3 +864,89 @@ Order on `POST /v1/jobs`:
 
 - `GET /v1/jobs` accepts `created_after` (inclusive) and `created_before` (exclusive), as RFC 3339 times.
 - Attempts include `session_id` and the session's `worker_id`, which is `null` once the session row has been purged.
+
+## 17. Observability
+
+Implements FR-23 and HLD §17 ([ADR-020](decisions/ADR-020-telemetry.md)).
+
+### 17.1 Setup
+
+- `observability.SetupTelemetry` installs the global providers:
+  - a meter provider with the Prometheus exporter, served at `/metrics` on the ops server;
+  - when `JS_OTLP_ENDPOINT` is set, a tracer provider exporting OTLP over gRPC, with a parent-based sampler whose root ratio is `JS_TRACE_SAMPLE_RATIO` (`JS_OTLP_INSECURE` allows plaintext);
+  - the W3C trace-context propagator;
+  - an error handler that reports export failures through the structured logger.
+- **Resource:** `service.name=jobscheduler`, `service.version` and `service.instance.id`.
+- **Instruments** are declared in one file, `observability/metrics.go`, with the names, units and labels of HLD §17.3. They bind to the provider whenever it is installed. Gauge callbacks register on the same global meter, which the SDK's own meter would reject.
+- **Shutdown** flushes spans within 5 s; an unreachable collector delays exit by no more than that.
+
+### 17.2 Where each metric is recorded
+
+| Metric | Recorded by |
+|---|---|
+| `jobs_submitted_total`, `jobs_scheduled_total{source=delayed}` | API, per created job (not replays or deduplicated submissions) |
+| `jobs_rejected_total{reason}` | API, for `POST /v1/jobs` refused with 413, 429 or 503; `reason` is the error code |
+| `jobs_scheduled_total{source=schedule}` | Materializer, per inserted fire |
+| `scheduling_lag_seconds` | Promoter, `ready_at − run_at` returned by each promotion |
+| `dispatch_latency_seconds` | Dispatcher, `attempt_started_at − ready_at` of each job delivered to a poll |
+| `attempts_total`, `execution_duration_seconds`, `jobs_retried_total`, `jobs_dead_lettered_total` | `CompleteAttempt`: worker reports, the reaper and deregistration all pass through it |
+| `jobs_completed_total` | Every move to history: completion, cancel, expire, skip, supersede, bulk cancel |
+| `jobs_ready`, `jobs_oldest_ready_age_seconds`, `jobs_running`, `worker_slots` | The pool's owner, sampled every 10 s |
+| `pools_unowned` | Every engine node: pools with active sessions but no unexpired lease (for the "no pool owner" alert) |
+| `worker_sessions_expired_total` | Reaper |
+| `stale_completions_rejected_total`, `pool_owner_changes_total` | Dispatcher |
+| `db_transaction_duration_seconds{operation}` | `Store.inTx`, labeled with the calling exported method |
+| `db_pool_in_use`, `db_pool_max` | Connection pool statistics, labeled with the process roles |
+| `db_clock_offset_seconds` | Engine: database `clock_timestamp()` against the local clock, adjusted for round trip, every 10 s |
+
+**Counting only committed work.** Metrics recorded inside a transaction are queued with `onCommit(tx, fn)` and run by `inTx` only after the commit succeeds.
+
+**HTTP and RPC metrics:**
+
+- `otelhttp` measures requests (`http_server_request_duration_seconds`), labeled with the route pattern, `server_address="api"` and the listen port. Without the fixed name and port, both labels would come from the client's `Host` header.
+- `otelgrpc` measures worker RPCs, except `Poll` and `Heartbeat`.
+
+### 17.3 Traces
+
+**Spans:**
+
+- API requests, named after the route pattern, e.g. `POST /v1/jobs`.
+- Worker RPCs, through `otelgrpc` on both the server and the SDK, except `Poll` and `Heartbeat`.
+- Materialize and promote batches that did work, recorded after the fact.
+- Database transactions (`db.tx <operation>`), only as children of an existing span.
+
+**One job across the queue:**
+
+1. The submission stores its `traceparent` on the job (`jobs.trace_parent`).
+2. The dispatcher sends it as `Assignment.trace_parent`.
+3. The SDK starts `execute <type>` as a new root span, linked to the submission span, with the job ID, attempt number, type and tenant as attributes. Handlers receive it in their context, so their own spans join the attempt's trace.
+4. The SDK sends `Complete` inside that span, so the engine's completion span and its transaction join the attempt's trace.
+
+A manual retry keeps the original submission's `trace_parent`. Schedule-created jobs have none.
+
+The API access log includes `trace_id` and `span_id` whenever the request has a trace context: its own span, or the caller's when trace export is off.
+
+### 17.4 Alerts and local stack
+
+- **Alert rules:** `deploy/prometheus/alerts.yml` implements HLD §17.5 for the signals exported here.
+  - The backlog-age threshold is a single 5-minute default until pools have agreed targets.
+  - `DispatchStalled` also fires for a paused pool, or when the free workers can't run the waiting job types.
+  - Infrastructure alerts belong to the deployment phase: database CPU, failover and dead tuples.
+  - CI validates the Prometheus configuration and runs the rule unit tests (`alerts_test.yml`) with `promtool`.
+- **`docker compose`:**
+  - adds Prometheus, which scrapes the platform and loads the rules;
+  - adds `grafana/otel-lgtm` for traces and Grafana, with the platform exporting traces to it.
+
+### 17.5 Tests
+
+- **Metrics:**
+  - Store: every transition's counters and histograms, measured as changes between scrapes; hooks run only for committed transactions; pool gauge queries.
+  - API: after submissions, `/metrics` has exact per-tenant counts; replays and validation errors are not counted.
+- **Traces, end to end:**
+  - a submission's span is linked from the SDK's execution span, which starts a new trace;
+  - the handler's spans, the engine's `Complete` span and its transaction share the execution span's trace;
+  - polls and heartbeats produce no spans or RPC metrics;
+  - dispatch latency, attempts and pool gauges are recorded;
+  - the API stores its server span as the job's `trace_parent`, and logs the caller's trace ID.
+- **Configuration:** OTLP and sampling variables are parsed and validated.
+- **Smoke test:** with the collector unreachable, the binary serves `/metrics` and exits within the flush timeout.

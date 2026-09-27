@@ -27,6 +27,7 @@ type Job struct {
 	CorrelationID string
 	CreatedBy     string
 	RequestID     string
+	TraceParent   string // W3C traceparent of the submitting request; empty if none
 
 	RunAt          time.Time
 	StartDeadline  time.Time // zero means none

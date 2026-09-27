@@ -1,0 +1,103 @@
+# Alert rules for HLD §17.5, on the signals the platform exports (LLD §17.4). Thresholds are
+# initial values to tune against real traffic. Database CPU, failover and dead-tuple alerts
+# come from the managed database's own metrics, in the deployment phase.
+groups:
+  - name: jobscheduler
+    rules:
+      - alert: SchedulingLagSLO
+        expr: histogram_quantile(0.99, sum by (pool, le) (rate(scheduling_lag_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "Pool {{ $labels.pool }}: p99 scheduling lag is {{ $value | humanizeDuration }}"
+          description: Due jobs take more than 1 s to become READY (NFR-3). Check the promoter and database latency.
+
+      - alert: BacklogAge
+        # Replace 300 with per-pool targets once pools have agreed backlog SLOs.
+        expr: max by (pool) (jobs_oldest_ready_age_seconds) > 300
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "Pool {{ $labels.pool }}: oldest READY job has waited {{ $value | humanizeDuration }}"
+          description: Workers are not keeping up. Scale the pool's workers, or check for a held pool or job type.
+
+      - alert: DispatchStalled
+        # READY work and free slots, but nothing handed out. Also fires for a paused pool, or
+        # when the free workers cannot run the waiting job types.
+        expr: |
+          (sum by (pool) (jobs_ready) > 0)
+            and (sum by (pool) (worker_slots{state="free"}) > 0)
+            unless (sum by (pool) (increase(dispatch_latency_seconds_count[2m])) > 0)
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Pool {{ $labels.pool }} has READY jobs and free slots but dispatches nothing"
+          description: Check the pool owner's logs, pool and job-type holds, and worker job types.
+
+      - alert: NoPoolOwner
+        expr: max(pools_unowned) > 0
+        for: 30s
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} pool(s) with live workers have no owner"
+          description: No engine holds the pool lease, so its jobs are not dispatched. Check engine health and lease renewal.
+
+      - alert: DeadLetterSpike
+        expr: |
+          (sum by (type) (rate(jobs_dead_lettered_total[10m])) > 3 * sum by (type) (rate(jobs_dead_lettered_total[1d])))
+            and (sum by (type) (increase(jobs_dead_lettered_total[10m])) >= 10)
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Job type {{ $labels.type }}: dead letters at over 3x the daily rate"
+          description: Inspect the dead-lettered jobs' last errors; retry them once the cause is fixed.
+
+      - alert: SessionExpirySpike
+        expr: sum by (pool) (increase(worker_sessions_expired_total[5m])) > 10
+        labels:
+          severity: page
+        annotations:
+          summary: "Pool {{ $labels.pool }}: {{ $value }} worker sessions expired in 5 minutes"
+          description: Workers are crashing or cannot reach the engine (fleet or network problem).
+
+      - alert: ZombieReports
+        expr: sum by (pool) (increase(stale_completions_rejected_total[10m])) > 5
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Pool {{ $labels.pool }}: workers report attempts that are no longer theirs"
+          description: Workers keep running after losing their session, e.g. from long pauses or partitions. Their reports are rejected safely.
+
+      - alert: APIErrors
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{server_address="api", http_response_status_code=~"5.."}[5m]))
+            / sum(rate(http_server_request_duration_seconds_count{server_address="api"}[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "API 5xx ratio is {{ $value | humanizePercentage }}"
+          description: Check the API logs by trace_id, and database health.
+
+      - alert: DatabaseConnectionsSaturated
+        expr: max by (instance, role) (db_pool_in_use / db_pool_max) > 0.9
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.instance }} uses {{ $value | humanizePercentage }} of its database connections"
+          description: Slow queries or too small a pool (JS_DB_MAX_CONNS); compare db_transaction_duration_seconds by operation.
+
+      - alert: ClockOffset
+        expr: max by (instance) (abs(db_clock_offset_seconds)) > 0.5
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.instance }} clock is {{ $value | humanizeDuration }} off the database"
+          description: Leases and deadlines use the database clock, but local timeouts use this node's; fix NTP on the node.

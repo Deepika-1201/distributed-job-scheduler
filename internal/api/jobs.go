@@ -13,8 +13,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"jobscheduler/internal/domain"
+	"jobscheduler/internal/observability"
 	"jobscheduler/internal/persistence/postgres"
 )
 
@@ -172,6 +175,7 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request, p principal) 
 	if err != nil {
 		return err
 	}
+	nj.TraceParent = observability.TraceParent(r.Context())
 	var idem *postgres.Idempotency
 	if key := r.Header.Get("Idempotency-Key"); key != "" {
 		if len(key) > 255 {
@@ -187,10 +191,22 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request, p principal) 
 	status := http.StatusOK
 	if res.Outcome == postgres.Created {
 		status = http.StatusCreated
+		countSubmission(r, res.Job)
 	}
 	w.Header().Set("X-Submission-Outcome", string(res.Outcome))
 	writeJSON(w, status, toJobResponse(res.Job))
 	return nil
+}
+
+// countSubmission counts a created job, and a delayed one also as future work (HLD §17.3).
+func countSubmission(r *http.Request, j domain.Job) {
+	tenant, typ := attribute.String("tenant", string(j.TenantID)), attribute.String("type", j.Type)
+	observability.JobsSubmitted.Add(r.Context(), 1, metric.WithAttributes(tenant, typ,
+		attribute.String("priority", j.Priority.String())))
+	if j.State == domain.StateScheduled {
+		observability.JobsScheduled.Add(r.Context(), 1, metric.WithAttributes(tenant, typ,
+			attribute.String("source", "delayed")))
+	}
 }
 
 // resolveSubmission validates a request and fills in the job type's defaults (LLD §9.4).

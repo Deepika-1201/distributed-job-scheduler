@@ -2,7 +2,7 @@
 
 A distributed job scheduling and execution platform: durable jobs that run now, later or on a recurring schedule, with at-least-once execution, retries, priorities and fair sharing across tenants, on a horizontally scalable worker fleet.
 
-**Status:** phases 1–4 and 6–9 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies), coordination (epoch-fenced leases with self-fencing) and the worker system (gRPC [protocol](proto/jobscheduler/worker/v1/worker.proto), dispatcher with weighted priorities and tenant caps, [Go SDK](pkg/workersdk), demo worker), and recovery (reaper with warm-up, engine-side timeouts, retention and partition maintenance, bulk cancel and re-drive). Every V1 functional requirement except FR-23 (metrics and traces) is implemented. That includes platform administration (worker drain, pool and job-type pause), tenant quotas with priority-aware load shedding, and payload JSON Schemas.
+**Status:** phases 1–4, 6–9 and 11 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies), coordination (epoch-fenced leases with self-fencing) and the worker system (gRPC [protocol](proto/jobscheduler/worker/v1/worker.proto), dispatcher with weighted priorities and tenant caps, [Go SDK](pkg/workersdk), demo worker), recovery (reaper with warm-up, engine-side timeouts, retention and partition maintenance, bulk cancel and re-drive), and observability (Prometheus metrics, OpenTelemetry traces linked from submission to execution, alert rules). Every V1 functional requirement is implemented. That includes platform administration (worker drain, pool and job-type pause), tenant quotas with priority-aware load shedding, and payload JSON Schemas.
 
 ## Documentation
 
@@ -10,7 +10,7 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 |---|---|
 | [High-level design](docs/architecture.md) | Requirements, architecture, failure scenarios, deployment |
 | [Low-level design](docs/low-level-design.md) | Code structure, state machines, algorithms (grows each phase) |
-| [Decision records](docs/decisions/) | ADR-001 to ADR-019, one decision per file |
+| [Decision records](docs/decisions/) | ADR-001 to ADR-020, one decision per file |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
 
 ## Quick start
@@ -20,8 +20,9 @@ Requires Go 1.26+. Integration tests start an embedded PostgreSQL automatically 
 ```sh
 make lint test-race   # formatting, vet, all tests with the race detector
 make build            # bin/jobscheduler
-docker compose up     # PostgreSQL, migrations, then the platform (api + engine roles)
+docker compose up     # PostgreSQL, migrations, the platform (api + engine roles), Prometheus, Grafana
 curl localhost:9090/readyz
+curl localhost:9090/metrics
 ```
 
 To run against an existing PostgreSQL instead: `JS_DATABASE_URL=postgres://... make migrate run`.
@@ -55,15 +56,24 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 | `JS_HISTORY_RETENTION` | `720h` (30 days) |
 | `JS_DB_MAX_CONNS` | `10` |
 | `JS_LOG_LEVEL` / `JS_LOG_FORMAT` | `info` / `json` |
+| `JS_OTLP_ENDPOINT` / `JS_OTLP_INSECURE` | empty (trace export off) / `false` |
+| `JS_TRACE_SAMPLE_RATIO` | `1` (share of root traces kept) |
 | `JS_SHUTDOWN_DELAY` / `JS_SHUTDOWN_TIMEOUT` | `0s` / `30s` |
 
 Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./bin/demo-worker`.
+
+## Observability
+
+- **Metrics:** Prometheus format on the ops port (`/metrics`), with the names and labels of [HLD §17.3](docs/architecture.md#17-observability). Under `docker compose`, Prometheus runs on `localhost:9091` with the [alert rules](deploy/prometheus/alerts.yml) loaded.
+- **Traces:** OTLP to `JS_OTLP_ENDPOINT`. A job's execution trace links back to the request that submitted it. Under `docker compose`, traces go to Grafana on `localhost:3000`.
+- **Logs:** JSON, with `trace_id` on request logs.
 
 ## Layout
 
 ```
 api/openapi.yaml    REST API contract
 cmd/jobscheduler/   server binary (serve, migrate, bootstrap)
+deploy/prometheus/  Prometheus configuration, alert rules and their tests
 internal/           application packages (see LLD §1)
 docs/               designs, ADRs, plan
 ```

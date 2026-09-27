@@ -36,6 +36,7 @@ type NewJob struct {
 	AttemptTimeout time.Duration
 	RetryPolicy    domain.RetryPolicy
 	AtMostOnce     bool
+	TraceParent    string // W3C traceparent of the submitting request (ADR-020)
 }
 
 // Idempotency identifies a client request so that retries of it are replayed (LLD §8.4).
@@ -62,12 +63,12 @@ const opCreateJob = "job.create"
 var insertJobSQL = `
 INSERT INTO jobs (id, tenant_id, job_type, job_type_version, pool, state, priority, payload, labels,
     dedupe_key, correlation_id, created_by, request_id, run_at, start_deadline, deadline,
-    attempt_timeout_ms, retry_policy, at_most_once, created_at, ready_at, updated_at)
+    attempt_timeout_ms, retry_policy, at_most_once, created_at, ready_at, updated_at, trace_parent)
 SELECT $1::uuid, $2::uuid, $3::text, $4::integer, $5::text,
     CASE WHEN r.run_at <= now() THEN 'READY' ELSE 'SCHEDULED' END,
     $6::smallint, $7::json, $8::jsonb, $9::text, $10::text, $11::text, $12::text, r.run_at,
     $14::timestamptz, $15::timestamptz, $16::bigint, $17::jsonb, $18::boolean,
-    now(), CASE WHEN r.run_at <= now() THEN now() END, now()
+    now(), CASE WHEN r.run_at <= now() THEN now() END, now(), $19::text
 FROM (SELECT COALESCE($13::timestamptz, now()) AS run_at) AS r
 ON CONFLICT (tenant_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
 RETURNING ` + activeColumns
@@ -168,6 +169,7 @@ func insertJob(ctx context.Context, tx pgx.Tx, tenant, id string, nj NewJob) (do
 		nullText(nj.DedupeKey), nullText(nj.CorrelationID), nj.CreatedBy, nullText(nj.RequestID),
 		nullTime(nj.RunAt), nullTime(nj.StartDeadline), nullTime(nj.Deadline),
 		nj.AttemptTimeout.Milliseconds(), policyToJSON(nj.RetryPolicy), nj.AtMostOnce,
+		nullText(nj.TraceParent),
 	}
 	for range 3 {
 		job, err := scanJob(tx.QueryRow(ctx, insertJobSQL, args...))
@@ -404,6 +406,7 @@ func (s *Store) CompleteAttempt(ctx context.Context, c Completion) (CompletionRe
 		if err := insertAttempt(ctx, tx, job, c); err != nil {
 			return err
 		}
+		onCommit(tx, func() { recordAttempt(job, c.End.State, decision, now) })
 
 		var updated domain.Job
 		if decision.Next == domain.StateRetryPending {
@@ -442,7 +445,7 @@ func resolveUnmatchedCompletion(ctx context.Context, tx pgx.Tx, jobID, attemptID
 	case err == nil && domain.AttemptState(recorded) == c.End.State:
 		return CompletionResult{Job: job, Replayed: true}, nil
 	default:
-		return CompletionResult{}, domain.ErrStaleAttempt
+		return CompletionResult{Job: job}, domain.ErrStaleAttempt
 	}
 }
 
@@ -498,6 +501,9 @@ func moveToHistory(ctx context.Context, tx pgx.Tx, jobID string, from domain.Job
 		nullText(t.Error), nullText(string(t.Reason)), t.Result))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Job{}, fmt.Errorf("job %s left state %s concurrently", jobID, from)
+	}
+	if err == nil {
+		countCompleted(tx, job.Type, job.State)
 	}
 	if err != nil || job.ScheduleID == "" {
 		return job, err

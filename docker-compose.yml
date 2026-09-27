@@ -38,6 +38,8 @@ services:
       <<: *app-env
       JS_ROLES: api,engine
       JS_WORKER_ADVERTISE_ADDR: localhost:7070
+      JS_OTLP_ENDPOINT: otel-lgtm:4317
+      JS_OTLP_INSECURE: "true" # plaintext inside the compose network only
     ports:
       - "8080:8080"
       - "9090:9090"
@@ -45,6 +47,23 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  # Scrapes the scheduler's /metrics and evaluates deploy/prometheus/alerts.yml.
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+    ports:
+      - "9091:9090"
+
+  # Receives traces over OTLP and serves Grafana on :3000; add http://prometheus:9090 as a
+  # Prometheus data source for the platform's metrics.
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.34.0
+    ports:
+      - "3000:3000"
+      - "4317:4317"
 
 volumes:
   pgdata:

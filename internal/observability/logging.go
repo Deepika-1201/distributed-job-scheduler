@@ -1,4 +1,4 @@
-// Package observability sets up logging; telemetry exporters are added in phase 11.
+// Package observability sets up logging, metrics and tracing (LLD §17).
 package observability
 
 import (

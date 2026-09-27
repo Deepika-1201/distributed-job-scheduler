@@ -17,7 +17,11 @@ import (
 	"slices"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"jobscheduler/internal/domain"
+	"jobscheduler/internal/observability"
 	"jobscheduler/internal/persistence/postgres"
 )
 
@@ -33,6 +37,8 @@ type Config struct {
 	// ShedLowAfter and ShedNormalAfter are the pool backlog ages at which LOW and NORMAL
 	// submissions are shed (ADR-018); zero means 5 and 15 minutes.
 	ShedLowAfter, ShedNormalAfter time.Duration
+	// Addr is the listen address, whose port labels the HTTP metrics.
+	Addr string
 }
 
 type Server struct {
@@ -45,10 +51,11 @@ type Server struct {
 	now       func() time.Time
 	mux       *http.ServeMux
 	routes    []string
+	addr      string
 }
 
 func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
-	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux()}
+	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux(), addr: cfg.Addr}
 	s.auth = newAuthenticator(store, s.now)
 	s.limiter = newRateLimiter(s.now)
 	s.schemas = &schemaCache{}
@@ -133,23 +140,40 @@ func (s *Server) handle(pattern string, minRole domain.Role, h handlerFunc) {
 			if ae == errInternal {
 				s.log.Error("request failed", "request_id", requestID(r), "error", err)
 			}
+			if pattern == submitRoute && p.Tenant != "" {
+				countRejection(r, p.Tenant, ae)
+			}
 			writeError(w, r, ae)
 		}
 	})
 }
 
-// Handler returns the API with its request-scoped middleware.
+const submitRoute = "POST /v1/jobs"
+
+// countRejection counts a submission refused by admission control: rate, quota, size or load
+// shedding (HLD §17.3).
+func countRejection(r *http.Request, tenant domain.TenantID, ae *apiError) {
+	switch ae.status {
+	case http.StatusRequestEntityTooLarge, http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		observability.JobsRejected.Add(r.Context(), 1, metric.WithAttributes(
+			attribute.String("tenant", string(tenant)), attribute.String("reason", ae.code)))
+	}
+}
+
+// Handler returns the API with its request-scoped middleware, measured and traced (ADR-020).
 func (s *Server) Handler() http.Handler {
 	notFound := func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, newError(http.StatusNotFound, "not_found", "no such endpoint"))
 	}
-	return s.middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, pattern := s.mux.Handler(r); pattern == "" {
+	return observability.HTTPHandler(s.middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, pattern := s.mux.Handler(r)
+		if pattern == "" {
 			notFound(w, r)
 			return
 		}
+		observability.SetRoute(r, pattern)
 		s.mux.ServeHTTP(w, r)
-	}))
+	})), "api", s.addr)
 }
 
 type ctxKey int
@@ -206,8 +230,9 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				s.log.Error("panic serving request", "request_id", id, "panic", v, "stack", string(debug.Stack()))
 				writeError(rec, r, errInternal)
 			}
-			s.log.Info("request", "method", r.Method, "route", r.Pattern, "path", r.URL.Path, "status", rec.status,
-				"duration_ms", s.now().Sub(start).Milliseconds(), "request_id", id, "tenant_id", *tenant)
+			s.log.Info("request", append([]any{"method", r.Method, "route", r.Pattern, "path", r.URL.Path,
+				"status", rec.status, "duration_ms", s.now().Sub(start).Milliseconds(), "request_id", id,
+				"tenant_id", *tenant}, observability.TraceAttrs(ctx)...)...)
 		}()
 		next.ServeHTTP(rec, r)
 	})

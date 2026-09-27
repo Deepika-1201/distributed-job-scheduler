@@ -1,0 +1,80 @@
+# promtool test rules deploy/prometheus/alerts_test.yml
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 30s
+
+tests:
+  - name: dispatch stalls only while work and slots are idle
+    interval: 30s
+    input_series:
+      - series: 'jobs_ready{pool="stuck", priority="NORMAL"}'
+        values: "5x10"
+      - series: 'worker_slots{pool="stuck", state="free"}'
+        values: "3x10"
+      - series: 'jobs_ready{pool="busy", priority="NORMAL"}'
+        values: "5x10"
+      - series: 'worker_slots{pool="busy", state="free"}'
+        values: "3x10"
+      - series: 'dispatch_latency_seconds_count{pool="busy", priority="NORMAL"}'
+        values: "0+2x10"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DispatchStalled
+        exp_alerts:
+          - exp_labels: { pool: stuck, severity: page }
+            exp_annotations:
+              summary: "Pool stuck has READY jobs and free slots but dispatches nothing"
+              description: "Check the pool owner's logs, pool and job-type holds, and worker job types."
+
+  - name: an unowned pool pages after 30 seconds
+    interval: 15s
+    input_series:
+      - series: 'pools_unowned{instance="engine-a"}'
+        values: "0 0 1 1 1 1"
+      - series: 'pools_unowned{instance="engine-b"}'
+        values: "0 0 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: NoPoolOwner
+      - eval_time: 75s
+        alertname: NoPoolOwner
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations:
+              summary: "1 pool(s) with live workers have no owner"
+              description: "No engine holds the pool lease, so its jobs are not dispatched. Check engine health and lease renewal."
+
+  - name: scheduling lag over 1 s at p99 for 10 minutes
+    interval: 1m
+    input_series:
+      - series: 'scheduling_lag_seconds_bucket{pool="slow", le="1"}'
+        values: "0+1x20"
+      - series: 'scheduling_lag_seconds_bucket{pool="slow", le="2.5"}'
+        values: "0+100x20"
+      - series: 'scheduling_lag_seconds_bucket{pool="slow", le="+Inf"}'
+        values: "0+100x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: SchedulingLagSLO
+        exp_alerts:
+          - exp_labels: { pool: slow, severity: page }
+            exp_annotations:
+              summary: "Pool slow: p99 scheduling lag is 2.485s"
+              description: "Due jobs take more than 1 s to become READY (NFR-3). Check the promoter and database latency."
+
+  - name: API 5xx ratio above 1%
+    interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{server_address="api", http_response_status_code="200"}'
+        values: "0+950x15"
+      - series: 'http_server_request_duration_seconds_count{server_address="api", http_response_status_code="503"}'
+        values: "0+50x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: APIErrors
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations:
+              summary: "API 5xx ratio is 5%"
+              description: "Check the API logs by trace_id, and database health."

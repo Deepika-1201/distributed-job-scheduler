@@ -12,8 +12,11 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -23,6 +26,7 @@ import (
 
 	"jobscheduler/internal/coordination"
 	"jobscheduler/internal/domain"
+	"jobscheduler/internal/observability"
 	"jobscheduler/internal/persistence/postgres"
 	"jobscheduler/pkg/workerpb"
 )
@@ -36,6 +40,7 @@ type Config struct {
 	HeartbeatInterval time.Duration // default 5 s
 	RoundInterval     time.Duration // default 100 ms, while workers wait
 	MaxPollWait       time.Duration // default 30 s
+	MetricsInterval   time.Duration // how often gauges are sampled, default 10 s
 	Weights           domain.PriorityWeights
 }
 
@@ -51,6 +56,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.MaxPollWait == 0 {
 		c.MaxPollWait = 30 * time.Second
+	}
+	if c.MetricsInterval == 0 {
+		c.MetricsInterval = 10 * time.Second
 	}
 	if c.Weights == nil {
 		c.Weights = domain.DefaultPriorityWeights()
@@ -85,6 +93,8 @@ type Dispatcher struct {
 	capsMu      sync.Mutex
 	caps        map[domain.TenantID]int
 	capsFetched time.Time
+
+	node atomic.Pointer[nodeSample]
 }
 
 func New(store *postgres.Store, cfg Config, log *slog.Logger) (*Dispatcher, error) {
@@ -102,7 +112,7 @@ func New(store *postgres.Store, cfg Config, log *slog.Logger) (*Dispatcher, erro
 		TTL: coordination.PoolTTL, Margin: coordination.Margin,
 		Wanted: d.wantedPools, OnAcquired: d.startPool, OnLost: d.stopPool,
 	}, log)
-	d.server = grpc.NewServer(grpc.UnaryInterceptor(d.authenticate))
+	d.server = grpc.NewServer(grpc.StatsHandler(observability.GRPCServerHandler()), grpc.UnaryInterceptor(d.authenticate))
 	workerpb.RegisterWorkerServiceServer(d.server, d)
 	return d, nil
 }
@@ -112,14 +122,19 @@ func (d *Dispatcher) Name() string { return "dispatcher" }
 // Run serves workers until ctx ends. On shutdown it hands its pools to other nodes first, so
 // waiting polls return at once, then finishes in-flight calls.
 func (d *Dispatcher) Run(ctx context.Context) error {
+	gauges, err := d.registerGauges()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = gauges.Unregister() }()
 	leaseCtx, stopLeases := context.WithCancel(context.WithoutCancel(ctx))
 	var wg sync.WaitGroup
 	wg.Go(func() { _ = d.leases.Run(leaseCtx) })
 	wg.Go(func() { d.refreshWanted(ctx) })
+	wg.Go(func() { d.sampleNode(ctx) })
 	served := make(chan error, 1)
 	go func() { served <- d.server.Serve(d.cfg.Listener) }()
 
-	var err error
 	select {
 	case <-ctx.Done():
 	case err = <-served:
@@ -259,6 +274,9 @@ func (d *Dispatcher) Complete(ctx context.Context, req *workerpb.CompleteRequest
 		End: end, Error: truncate(req.Error, maxErrorBytes), Result: result, Actor: domain.ActorDispatcher,
 	})
 	if err != nil {
+		if errors.Is(err, domain.ErrStaleAttempt) {
+			observability.StaleCompletions.Add(ctx, 1, metric.WithAttributes(attribute.String("pool", res.Job.Pool)))
+		}
 		return nil, d.toStatus(err)
 	}
 	return &workerpb.CompleteResponse{JobState: string(res.Job.State), Replayed: res.Replayed}, nil
@@ -290,7 +308,7 @@ func toAssignment(j domain.Job) *workerpb.Assignment {
 		JobId: string(j.ID), AttemptId: string(j.Current.ID), AttemptNumber: int64(j.Current.Number),
 		JobType: j.Type, JobTypeVersion: int32(j.TypeVersion), Payload: j.Payload, Labels: j.Labels,
 		TenantId: string(j.TenantID), Priority: j.Priority.String(), Deadline: timestamppb.New(j.Current.Deadline),
-		Timeout: durationpb.New(j.AttemptTimeout), ScheduleId: string(j.ScheduleID),
+		Timeout: durationpb.New(j.AttemptTimeout), ScheduleId: string(j.ScheduleID), TraceParent: j.TraceParent,
 	}
 	if !j.FireTime.IsZero() {
 		a.FireTime = timestamppb.New(j.FireTime)
@@ -371,6 +389,8 @@ func (d *Dispatcher) startPool(l postgres.Lease) {
 		old.stop()
 	}
 	go p.run()
+	go p.sampleGauges()
+	observability.PoolOwnerChanges.Add(context.Background(), 1, metric.WithAttributes(attribute.String("pool", name)))
 	d.log.Info("dispatching pool", "pool", name, "epoch", l.Epoch)
 }
 

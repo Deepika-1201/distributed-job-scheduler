@@ -77,6 +77,9 @@ message Assignment {
   google.protobuf.Duration timeout = 11;
   string schedule_id = 12;
   google.protobuf.Timestamp fire_time = 13;
+  // The W3C traceparent of the submitting request, if any. The worker links its execution
+  // span to it rather than parenting on it: the job may run long after the request ended.
+  string trace_parent = 14;
 }
 
 message HeartbeatRequest {

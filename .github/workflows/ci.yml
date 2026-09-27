@@ -19,3 +19,15 @@ jobs:
       - run: make lint
       - run: make test-race
       - run: make build
+
+  deploy-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker compose config -q
+      - name: Check the Prometheus configuration and alert rules
+        run: |
+          for args in "check config prometheus.yml" "test rules alerts_test.yml"; do
+            docker run --rm -v "$PWD/deploy/prometheus:/etc/prometheus:ro" -w /etc/prometheus \
+              --entrypoint promtool prom/prometheus:v3.15.0 $args
+          done

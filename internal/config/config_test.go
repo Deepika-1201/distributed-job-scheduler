@@ -157,6 +157,25 @@ func TestLoadAPISettings(t *testing.T) {
 	}
 }
 
+func TestLoadTelemetrySettings(t *testing.T) {
+	cfg, err := Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs"}))
+	if err != nil || cfg.Telemetry != (Telemetry{SampleRatio: 1}) {
+		t.Fatalf("default telemetry = %+v, %v; want export off and every root sampled", cfg.Telemetry, err)
+	}
+	cfg, err = Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs",
+		"JS_OTLP_ENDPOINT": "collector:4317", "JS_OTLP_INSECURE": "true", "JS_TRACE_SAMPLE_RATIO": "0.1"}))
+	if err != nil || cfg.Telemetry != (Telemetry{OTLPEndpoint: "collector:4317", OTLPInsecure: true, SampleRatio: 0.1}) {
+		t.Fatalf("telemetry = %+v, %v", cfg.Telemetry, err)
+	}
+	_, err = Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs",
+		"JS_OTLP_ENDPOINT": "http://collector:4317", "JS_OTLP_INSECURE": "yes", "JS_TRACE_SAMPLE_RATIO": "1.5"}))
+	for _, want := range []string{"JS_OTLP_ENDPOINT: must be host:port", "JS_OTLP_INSECURE", "JS_TRACE_SAMPLE_RATIO"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+}
+
 func TestLoadNeverEchoesDatabaseURL(t *testing.T) {
 	_, err := Load(env(map[string]string{
 		"JS_DATABASE_URL": "postgres://user:s3cret@db/jobs",
