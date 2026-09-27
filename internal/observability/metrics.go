@@ -20,8 +20,8 @@ var (
 	PoolOwnerChanges = counter("pool_owner_changes", "{change}", "Pool leases acquired by this node (pool)")
 
 	SchedulingLag     = histogram("scheduling_lag", "s", "Due time to READY (pool)", latencyBuckets)
-	DispatchLatency   = histogram("dispatch_latency", "s", "READY to attempt start, from when a worker was free for the job (pool, priority)", latencyBuckets)
-	QueueWait         = histogram("queue_wait", "s", "READY to attempt start, including waiting for a free worker (pool, priority)", waitBuckets)
+	DispatchLatency   = histogram("dispatch_latency", "s", "READY to attempt start, from when the job could go to a free worker (pool, priority)", latencyBuckets)
+	QueueWait         = histogram("queue_wait", "s", "READY to attempt start: the whole wait, for a free worker or behind a hold (pool, priority)", waitBuckets)
 	ExecutionDuration = histogram("execution_duration", "s", "Attempt run time (type, outcome)", durationBuckets)
 	DBTransaction     = histogram("db_transaction_duration", "s", "Database transaction time (operation)", dbBuckets)
 

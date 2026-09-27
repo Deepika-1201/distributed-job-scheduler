@@ -1122,8 +1122,8 @@ Job types, schedules and jobs belong to a tenant. Pools are platform resources o
 | `jobs_running` | Gauge | pool, tenant | Concurrency |
 | `jobs_completed_total` | Counter | type, state | Succeeded, failed, dead-lettered, cancelled, expired, skipped |
 | `scheduling_lag_seconds` | Histogram | pool | `ready_at − run_at` (NFR-3) |
-| `dispatch_latency_seconds` | Histogram | pool, priority | From when a worker was free for the job to its start: `started_at − max(ready_at, poll arrival)` (NFR-4, [ADR-022](decisions/ADR-022-dispatch-latency-from-a-free-worker.md)) |
-| `queue_wait_seconds` | Histogram | pool, priority | `started_at − ready_at`, including waiting for a free worker |
+| `dispatch_latency_seconds` | Histogram | pool, priority | From when the job could go to a free worker to its start: `started_at − max(ready_at, poll arrival, tenant cap freed)` (NFR-4, [ADR-022](decisions/ADR-022-dispatch-latency-from-a-free-worker.md)) |
+| `queue_wait_seconds` | Histogram | pool, priority | `started_at − ready_at`: the whole wait, for a free worker or behind a hold |
 | `execution_duration_seconds` | Histogram | type, outcome | How long attempts take |
 | `attempts_total` | Counter | type, outcome | Success, failure, timeout and lost rates |
 | `jobs_retried_total` | Counter | type, reason | Retry rate |

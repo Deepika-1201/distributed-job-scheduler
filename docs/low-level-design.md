@@ -903,8 +903,8 @@ Implements FR-23 and HLD §17 ([ADR-020](decisions/ADR-020-telemetry.md)).
 | `jobs_rejected_total{reason}` | API, for `POST /v1/jobs` refused with 413, 429 or 503; `reason` is the error code |
 | `jobs_scheduled_total{source=schedule}` | Materializer, per inserted fire |
 | `scheduling_lag_seconds` | Promoter, `ready_at − run_at` returned by each promotion |
-| `dispatch_latency_seconds` | Dispatcher, for each job delivered to a poll: from the later of `ready_at` and the poll's arrival, to `attempt_started_at` ([ADR-022](decisions/ADR-022-dispatch-latency-from-a-free-worker.md)). It is computed as `min(attempt_started_at − ready_at, time since the poll arrived)`, so the database and engine clocks are never compared |
-| `queue_wait_seconds` | Dispatcher, `attempt_started_at − ready_at` of each job delivered to a poll, including waiting for a free worker |
+| `dispatch_latency_seconds` | Dispatcher, for each job delivered to a poll: from the latest of `ready_at`, the poll's arrival and the round that last saw its capped tenant regain room, to `attempt_started_at` ([ADR-022](decisions/ADR-022-dispatch-latency-from-a-free-worker.md)). It is the minimum of the three waits, so the database and engine clocks are never compared |
+| `queue_wait_seconds` | Dispatcher, `attempt_started_at − ready_at` of each job delivered to a poll: the whole wait, for a free worker or behind a hold |
 | `attempts_total`, `execution_duration_seconds`, `jobs_retried_total`, `jobs_dead_lettered_total` | `CompleteAttempt`: worker reports, the reaper and deregistration all pass through it |
 | `jobs_completed_total` | Every move to history: completion, cancel, expire, skip, supersede, bulk cancel |
 | `jobs_ready`, `jobs_held`, `jobs_oldest_ready_age_seconds`, `pool_backlog_target_seconds`, `jobs_running`, `worker_slots` | The pool's owner, sampled every 10 s. `jobs_ready` and the age cover dispatchable work only (§18.2) |
@@ -976,7 +976,7 @@ The API access log includes `trace_id` and `span_id` whenever the request has a 
   - the handler's spans, the engine's `Complete` span and its transaction share the execution span's trace;
   - polls and heartbeats produce no spans or RPC metrics;
   - dispatch latency, attempts and pool gauges are recorded;
-  - a job that waits for a busy worker shows the wait in `queue_wait_seconds`, but not in dispatch latency;
+  - a job that waits for a busy worker, or for its tenant's cap to free up, shows the wait in `queue_wait_seconds`, but not in dispatch latency;
   - the API stores its server span as the job's `trace_parent`, and logs the caller's trace ID.
 - **Configuration:** OTLP and sampling variables are parsed and validated.
 - **Smoke test:** with the collector unreachable, the binary serves `/metrics` and exits within the flush timeout.

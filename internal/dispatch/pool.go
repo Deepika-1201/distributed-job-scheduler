@@ -69,11 +69,17 @@ type pool struct {
 	stopOnce sync.Once
 
 	gauges atomic.Pointer[postgres.PoolGauges] // latest sample, reported while owned
+
+	// Run goroutine only: capped tenants last seen at their cap, and when each was last seen with
+	// room again, so that dispatch latency leaves out time held by the cap (ADR-022).
+	atCap    map[domain.TenantID]bool
+	capFreed map[domain.TenantID]time.Time
 }
 
 func newPool(d *Dispatcher, name string, l postgres.Lease, selector *domain.PrioritySelector) *pool {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &pool{d: d, name: name, lease: l, selector: selector, kick: make(chan struct{}, 1), ctx: ctx, cancel: cancel}
+	return &pool{d: d, name: name, lease: l, selector: selector, kick: make(chan struct{}, 1), ctx: ctx, cancel: cancel,
+		atCap: map[domain.TenantID]bool{}, capFreed: map[domain.TenantID]time.Time{}}
 }
 
 func (p *pool) stop() { p.stopOnce.Do(p.cancel) }
@@ -167,11 +173,17 @@ func (p *pool) caps(ctx context.Context) (*capState, error) {
 		return nil, err
 	}
 	cs := &capState{allow: map[domain.TenantID]int{}}
+	now := time.Now()
 	for t, limit := range caps {
 		if left := limit - running[t]; left > 0 {
 			cs.allow[t] = left
+			if p.atCap[t] {
+				delete(p.atCap, t)
+				p.capFreed[t] = now
+			}
 		} else {
 			cs.skip = append(cs.skip, t)
+			p.atCap[t] = true
 		}
 	}
 	return cs, nil

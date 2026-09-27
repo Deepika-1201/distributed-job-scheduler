@@ -23,15 +23,16 @@
 | Option | Pros | Cons |
 |---|---|---|
 | Keep the metric; judge NFR-4 only for pools with free slots, in PromQL | No code change | Free slots are sampled every 10 s, so a pool busy for part of a window counts wholesale in or out; queueing still leaks into the SLO |
-| **Measure from the later of the job's ready time and the poll's arrival; record the full wait separately** | Exact for each job: a waiting poll is a free worker. The full wait stays available for capacity questions. | One more histogram per dispatched job |
-| Also track when holds end (a tenant's cap frees up, a job type resumes) | Also excludes held time exactly | State per tenant and per pause, for an error of at most one poll wait |
+| **Measure from the latest of the job's ready time, the poll's arrival and its tenant's cap freeing up; record the full wait separately** | Exact for each job: a waiting poll is a free worker, and each dispatch round already reads capped tenants' running counts. The full wait stays available for capacity questions. | One more histogram per dispatched job |
+| Also track when pauses end | Excludes every hold exactly | State per job type, for a rare event whose error is at most one poll wait |
 
 ## Decision
 
-- **`dispatch_latency_seconds{pool, priority}`** is the time from when a worker was free for the job to its start: `started_at − max(ready_at, poll arrival)`.
+- **`dispatch_latency_seconds{pool, priority}`** is the time from when the job could go to a free worker to its start: `started_at − max(ready_at, poll arrival, cap freed)`.
   - A poll is a worker with free slots asking for work, so its arrival is when the worker became free.
-  - The dispatcher computes `min(started_at − ready_at, time since the poll arrived)`. The first term uses the database clock and the second the engine's monotonic clock, so the two clocks are never compared.
-- **New `queue_wait_seconds{pool, priority}`:** `started_at − ready_at`, the full wait, including time spent waiting for a free worker. Its buckets reach 24 h, the longest backlog target.
+  - "Cap freed" is when a dispatch round last saw the job's tenant go from its running cap to having room. Rounds read capped tenants' running counts anyway, every 100 ms while workers wait.
+  - The dispatcher computes `min(started_at − ready_at, time since the poll arrived, time since the cap freed)`. The first term uses the database clock and the others the engine's monotonic clock, so the two clocks are never compared.
+- **New `queue_wait_seconds{pool, priority}`:** `started_at − ready_at`, the job's whole wait, for a free worker or behind a hold. Its buckets reach 24 h, the longest backlog target.
 - **Dashboards:**
   - The overview's NFR-4 tile and the per-pool latency panels use the new definition.
   - The pools dashboard shows queue wait by priority next to the backlog age.
@@ -39,7 +40,7 @@
 
 ## Trade-offs
 
-- **Held jobs:** a job held by its tenant's cap or a pause, while a worker waits idle, counts from the start of that worker's poll. A poll lasts at most 30 s, so held time adds at most one poll's wait.
+- **Paused jobs:** a job held by a pause, while a worker waits idle, counts from the start of that worker's poll. A poll lasts at most 30 s, so the pause adds at most one poll's wait, once per resume.
 - **Handoffs:** while a pool has no owner, workers' polls are refused or redirected, and each new poll restarts the clock. The gap shows as queue wait, owner changes and `pools_unowned`, and the no-owner alert bounds it, but dispatch latency leaves it out.
 - **Cost:** one more histogram per dispatched job, with 16 buckets for each pool and priority on the pool's owner.
 - **The upgrade:** samples recorded before this change used the old meaning, so a window spanning the upgrade mixes the two.
@@ -51,5 +52,5 @@
 
 ## Revisit when
 
-- Held work with idle workers is common enough to distort the SLO. Then record when holds end.
+- Resumes are frequent enough to distort the SLO. Then record when pauses end.
 - Handoff gaps must count toward NFR-4. Then workers send how long they have been free with each poll, an additive protocol field.

@@ -140,15 +140,20 @@ func (p *pool) sample() error {
 }
 
 // recordDispatch measures jobs handed to a worker: how long each waited in READY, and how long
-// it waited once a worker was free for it (NFR-4), from the later of its ready time and the
-// poll's arrival. Ready and start times are on the database clock and the poll's wait on this
-// node's monotonic clock, so the two clocks are never compared.
+// it waited once a worker was free for it and its tenant's cap had room (NFR-4). That is from
+// the latest of its ready time, the poll's arrival and its tenant's cap freeing up. Ready and
+// start times are on the database clock and the rest on this node's monotonic clock, so the
+// two clocks are never compared.
 func (p *pool) recordDispatch(jobs []domain.Job, polled time.Time) {
 	free := time.Since(polled)
 	for _, j := range jobs {
 		attrs := metric.WithAttributes(attribute.String("pool", p.name), attribute.String("priority", j.Priority.String()))
 		wait := max(0, j.Current.StartedAt.Sub(j.ReadyAt))
+		latency := min(wait, free)
+		if freed, ok := p.capFreed[j.TenantID]; ok {
+			latency = min(latency, time.Since(freed))
+		}
 		observability.QueueWait.Record(context.Background(), wait.Seconds(), attrs)
-		observability.DispatchLatency.Record(context.Background(), min(wait, free).Seconds(), attrs)
+		observability.DispatchLatency.Record(context.Background(), latency.Seconds(), attrs)
 	}
 }

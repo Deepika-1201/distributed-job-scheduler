@@ -184,7 +184,30 @@
           },
           "min": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* limit$"
+            },
+            "properties": [
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
@@ -357,7 +380,8 @@
             "showPoints": "never",
             "stacking": {
               "mode": "none"
-            }
+            },
+            "axisSoftMax": 1
           },
           "min": 0
         },

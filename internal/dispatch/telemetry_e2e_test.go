@@ -153,9 +153,31 @@ func TestJobIsTracedAcrossTheQueue(t *testing.T) {
 // latency (NFR-4) counts only from when the worker became free.
 func TestDispatchLatencyCountsFromAFreeWorker(t *testing.T) {
 	t.Parallel()
-	metrics, _ := telemetrytest.Install()
+	delta := runBehindABusyJob(t, newCluster(t), "queued", 1, time.Second)
+	onlyQueueWaitCounts(t, delta, "queued")
+}
+
+// A job held by its tenant's running cap while a worker waits for it counts from when the
+// cap had room again: the hold is the tenant's limit, not the platform's latency.
+func TestDispatchLatencyLeavesOutTenantCapHolds(t *testing.T) {
+	t.Parallel()
 	c := newCluster(t)
-	if _, err := c.store.CreateJobType(ctx, domain.JobType{TenantID: c.tenant, Name: "queued.job", Pool: "queued",
+	one := 1
+	if _, err := c.store.SetQuotas(ctx, c.tenant, domain.Quotas{MaxRunning: &one}, c.tenant, postgres.Audit{Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	// The second slot's poll stays open through the hold.
+	delta := runBehindABusyJob(t, c, "capped", 2, 10*time.Second)
+	onlyQueueWaitCounts(t, delta, "capped")
+}
+
+// runBehindABusyJob runs two jobs in pool: the first holds its slot for 1.2 s, and the second
+// waits in READY until it finishes. It returns how a series changed over the run.
+func runBehindABusyJob(t *testing.T, c *cluster, pool string, slots int, pollWait time.Duration) func(string, map[string]string) float64 {
+	t.Helper()
+	metrics, _ := telemetrytest.Install()
+	jobType := pool + ".job"
+	if _, err := c.store.CreateJobType(ctx, domain.JobType{TenantID: c.tenant, Name: jobType, Pool: pool,
 		DefaultPriority: domain.PriorityNormal, AttemptTimeout: time.Minute, RetryPolicy: domain.DefaultRetryPolicy(),
 		Enabled: true}, postgres.Audit{Actor: "test"}); err != nil {
 		t.Fatal(err)
@@ -165,38 +187,44 @@ func TestDispatchLatencyCountsFromAFreeWorker(t *testing.T) {
 	release := make(chan struct{})
 	var started atomic.Int32
 	c.run(func(ctx context.Context) error {
-		return workersdk.Run(ctx, workersdk.Config{Address: addr, Token: token, Pool: "queued", Slots: 1,
-			PollWait: time.Second, DrainTimeout: time.Second, Logger: slog.New(slog.DiscardHandler),
-			Handlers: map[string]workersdk.Handler{"queued.job": func(context.Context, workersdk.Job) ([]byte, error) {
+		return workersdk.Run(ctx, workersdk.Config{Address: addr, Token: token, Pool: pool, Slots: slots,
+			PollWait: pollWait, DrainTimeout: time.Second, Logger: slog.New(slog.DiscardHandler),
+			Handlers: map[string]workersdk.Handler{jobType: func(context.Context, workersdk.Job) ([]byte, error) {
 				if started.Add(1) == 1 {
 					<-release
 				}
 				return nil, nil
 			}}})
 	})
-	queued := func(nj *postgres.NewJob) { nj.Type, nj.Pool = "queued.job", "queued" }
-	first := c.submit(queued)
+	inPool := func(nj *postgres.NewJob) { nj.Type, nj.Pool = jobType, pool }
+	first := c.submit(inPool)
 	c.await(first, domain.StateRunning, 10*time.Second)
-	second := c.submit(queued) // waits for the only slot
+	second := c.submit(inPool)
 	time.Sleep(1200 * time.Millisecond)
 	close(release)
 	c.await(second, domain.StateSucceeded, 10*time.Second)
 
 	text := telemetrytest.Scrape(t, metrics)
-	delta := func(name string, labels map[string]string) float64 {
+	return func(name string, labels map[string]string) float64 {
 		n, _ := telemetrytest.Value(text, name, labels)
 		prev, _ := telemetrytest.Value(before, name, labels)
 		return n - prev
 	}
-	pool, underOne := map[string]string{"pool": "queued"}, map[string]string{"pool": "queued", "le": "1"}
-	if n := delta("queue_wait_seconds_count", pool); n != 2 {
+}
+
+// onlyQueueWaitCounts checks that the second job's wait shows as queue wait, while both jobs
+// started within 1 s of becoming dispatchable to a free worker.
+func onlyQueueWaitCounts(t *testing.T, delta func(string, map[string]string) float64, pool string) {
+	t.Helper()
+	all, underOne := map[string]string{"pool": pool}, map[string]string{"pool": pool, "le": "1"}
+	if n := delta("queue_wait_seconds_count", all); n != 2 {
 		t.Fatalf("queue_wait_seconds_count rose by %v, want 2", n)
 	}
 	if n := delta("queue_wait_seconds_bucket", underOne); n > 1 {
-		t.Errorf("%v jobs waited in READY at most 1 s, want the second one's wait behind the busy slot counted", n)
+		t.Errorf("%v jobs waited in READY at most 1 s, want the second one's wait counted", n)
 	}
 	if n := delta("dispatch_latency_seconds_bucket", underOne); n != 2 {
-		t.Errorf("%v of 2 jobs started within 1 s of a worker being free for them, want both", n)
+		t.Errorf("%v of 2 jobs had a dispatch latency of at most 1 s, want both", n)
 	}
 }
 
