@@ -99,7 +99,10 @@ func serve() error {
 	if cfg.Roles.Has(config.RoleAPI) {
 		apiServer := api.New(store, log, api.Config{
 			TenantRateLimit:     cfg.API.NodeRateLimit(),
+			Replicas:            cfg.API.Replicas,
 			MinScheduleInterval: cfg.API.MinScheduleInterval,
+			ShedLowAfter:        cfg.API.ShedLowAfter,
+			ShedNormalAfter:     cfg.API.ShedNormalAfter,
 		})
 		components = append(components, httpserver.New("api", cfg.HTTPAddr, apiServer.Handler(), cfg.ShutdownTimeout, log))
 	}

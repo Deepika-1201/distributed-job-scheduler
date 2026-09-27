@@ -58,7 +58,8 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
         "413": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
-        "429": { $ref: "#/components/responses/Error" }
+        "429": { description: "Rate limited (rate_limited) or over the pending-jobs quota (quota_exceeded); see Retry-After", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: "Shed under overload (overloaded): LOW first, then NORMAL; see Retry-After", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     get:
       summary: List jobs, newest first
       parameters:
@@ -186,6 +187,31 @@ paths:
   /v1/pools/{name}/resume:
     parameters: [{ $ref: "#/components/parameters/PoolName" }]
     post: { summary: Resume dispatch for a pool (platform-admin), responses: { "200": { $ref: "#/components/responses/Pool" } } }
+
+  /v1/quotas:
+    get:
+      summary: The caller's effective quotas, with platform defaults filled in; null means unlimited (ADR-018)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Quotas" } } } }
+  /v1/tenants:
+    get:
+      summary: List tenants (platform-admin)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/TenantList" } } } }
+  /v1/tenants/{id}/quotas:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+    get:
+      summary: A tenant's configured quotas; null means the platform default (platform-admin)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Quotas" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Replace a tenant's quotas (platform-admin); omitted or null fields use the platform default
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Quotas" } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Quotas" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
 
   /v1/operations:
     post:
@@ -455,6 +481,26 @@ components:
     PoolList:
       type: object
       properties: { items: { type: array, items: { $ref: "#/components/schemas/Pool" } } }
+    Quotas:
+      type: object
+      properties:
+        rate_limit: { type: [number, "null"], description: Submissions per second across all api nodes }
+        max_pending: { type: [integer, "null"], maximum: 1000000, description: Unfinished jobs }
+        max_running: { type: [integer, "null"], description: Running jobs in each pool }
+        max_schedules: { type: [integer, "null"], description: Active and paused schedules }
+        min_schedule_interval: { type: [string, "null"], description: Go duration between 1s and 24h }
+        max_payload_bytes: { type: [integer, "null"], maximum: 65536 }
+    TenantList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+              created_at: { type: string, format: date-time }
     OperationFilter:
       type: object
       properties:

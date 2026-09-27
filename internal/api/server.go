@@ -3,6 +3,7 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -20,36 +21,38 @@ import (
 	"jobscheduler/internal/persistence/postgres"
 )
 
-const (
-	maxBodyBytes    = 1 << 20
-	maxPayloadBytes = 64 << 10
-)
+const maxBodyBytes = 1 << 20
 
 type Config struct {
-	// TenantRateLimit is each tenant's request rate on this node, per second.
+	// TenantRateLimit is each tenant's default request rate on this node, per second.
 	TenantRateLimit float64
+	// Replicas is the number of api nodes; a tenant's own rate quota is split across them.
+	Replicas int
 	// MinScheduleInterval is the shortest schedule interval accepted; zero means 1 minute.
 	MinScheduleInterval time.Duration
+	// ShedLowAfter and ShedNormalAfter are the pool backlog ages at which LOW and NORMAL
+	// submissions are shed (ADR-018); zero means 5 and 15 minutes.
+	ShedLowAfter, ShedNormalAfter time.Duration
 }
 
 type Server struct {
-	store               *postgres.Store
-	log                 *slog.Logger
-	auth                *authenticator
-	limiter             *rateLimiter
-	now                 func() time.Time
-	mux                 *http.ServeMux
-	routes              []string
-	minScheduleInterval time.Duration
+	store     *postgres.Store
+	log       *slog.Logger
+	auth      *authenticator
+	limiter   *rateLimiter
+	admission *admission
+	now       func() time.Time
+	mux       *http.ServeMux
+	routes    []string
 }
 
 func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
-	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux(), minScheduleInterval: cfg.MinScheduleInterval}
-	if s.minScheduleInterval <= 0 {
-		s.minScheduleInterval = time.Minute
-	}
+	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux()}
 	s.auth = newAuthenticator(store, s.now)
-	s.limiter = newRateLimiter(cfg.TenantRateLimit, s.now)
+	s.limiter = newRateLimiter(s.now)
+	s.admission = &admission{store: store, now: s.now, defaultRate: cfg.TenantRateLimit, replicas: max(cfg.Replicas, 1),
+		defaultMinInterval: cmp.Or(cfg.MinScheduleInterval, time.Minute),
+		shedLow:            cmp.Or(cfg.ShedLowAfter, 5*time.Minute), shedNormal: cmp.Or(cfg.ShedNormalAfter, 15*time.Minute), quotaTTL: defaultQuotaTTL, pendingTTL: defaultPendingTTL, backlogTTL: defaultBacklogTTL, quotas: map[domain.TenantID]cached[domain.Quotas]{}, pending: map[domain.TenantID]cached[int]{}}
 
 	s.handle("POST /v1/job-types", domain.RoleAdmin, s.createJobType)
 	s.handle("GET /v1/job-types", domain.RoleViewer, s.listJobTypes)
@@ -84,6 +87,11 @@ func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
 	s.handle("POST /v1/pools/{name}/pause", domain.RolePlatformAdmin, s.poolAction(true))
 	s.handle("POST /v1/pools/{name}/resume", domain.RolePlatformAdmin, s.poolAction(false))
 
+	s.handle("GET /v1/quotas", domain.RoleViewer, s.getOwnQuotas)
+	s.handle("GET /v1/tenants", domain.RolePlatformAdmin, s.listTenants)
+	s.handle("GET /v1/tenants/{id}/quotas", domain.RolePlatformAdmin, s.getTenantQuotas)
+	s.handle("PUT /v1/tenants/{id}/quotas", domain.RolePlatformAdmin, s.putTenantQuotas)
+
 	s.handle("POST /v1/operations", domain.RoleOperator, s.createOperation)
 	s.handle("GET /v1/operations/{id}", domain.RoleViewer, s.getOperation)
 
@@ -106,9 +114,12 @@ func (s *Server) handle(pattern string, minRole domain.Role, h handlerFunc) {
 			err = errPermission("this operation requires the %s role", minRole)
 		}
 		if err == nil {
-			if ok, wait := s.limiter.allow(p.Tenant); !ok {
-				err = &apiError{status: http.StatusTooManyRequests, code: "rate_limited",
-					message: "tenant rate limit exceeded", retryAfter: wait}
+			var q domain.Quotas
+			if q, err = s.admission.tenantQuotas(r.Context(), p.Tenant); err == nil {
+				if ok, wait := s.limiter.allow(p.Tenant, s.admission.rate(q)); !ok {
+					err = &apiError{status: http.StatusTooManyRequests, code: "rate_limited",
+						message: "tenant rate limit exceeded", retryAfter: wait}
+				}
 			}
 		}
 		if err == nil {

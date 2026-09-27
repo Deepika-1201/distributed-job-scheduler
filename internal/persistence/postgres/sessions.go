@@ -180,14 +180,14 @@ func (s *Store) TenantCaps(ctx context.Context) (map[domain.TenantID]int, error)
 	return caps, err
 }
 
-// RunningCounts counts the running jobs of the given tenants across all pools.
-func (s *Store) RunningCounts(ctx context.Context, tenants []domain.TenantID) (map[domain.TenantID]int, error) {
+// RunningCounts counts the running jobs of the given tenants in one pool; caps apply per pool.
+func (s *Store) RunningCounts(ctx context.Context, pool string, tenants []domain.TenantID) (map[domain.TenantID]int, error) {
 	counts := make(map[domain.TenantID]int, len(tenants))
 	if len(tenants) == 0 {
 		return counts, nil
 	}
 	rows, err := s.pool.Query(ctx, `SELECT tenant_id::text, count(*) FROM jobs
-		WHERE state = 'RUNNING' AND tenant_id = ANY ($1::uuid[]) GROUP BY tenant_id`, uuidArray(tenants))
+		WHERE state = 'RUNNING' AND pool = $2 AND tenant_id = ANY ($1::uuid[]) GROUP BY tenant_id`, uuidArray(tenants), pool)
 	if err != nil {
 		return nil, err
 	}

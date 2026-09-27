@@ -60,6 +60,9 @@ type API struct {
 	Replicas        int
 	// MinScheduleInterval is the shortest interval a schedule may fire at (LLD §10.2).
 	MinScheduleInterval time.Duration
+	// ShedLowAfter and ShedNormalAfter are the pool backlog ages at which LOW and NORMAL
+	// submissions are rejected (ADR-018).
+	ShedLowAfter, ShedNormalAfter time.Duration
 }
 
 // NodeRateLimit is the share of the tenant rate limit enforced by one api replica.
@@ -87,6 +90,8 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 			TenantRateLimit:     p.floatInRange("JS_TENANT_RATE_LIMIT", 500, 1, 1e6),
 			Replicas:            p.intInRange("JS_API_REPLICAS", 1, 1, 1000),
 			MinScheduleInterval: p.duration("JS_MIN_SCHEDULE_INTERVAL", time.Minute),
+			ShedLowAfter:        p.duration("JS_SHED_LOW_AFTER", 5*time.Minute),
+			ShedNormalAfter:     p.duration("JS_SHED_NORMAL_AFTER", 15*time.Minute),
 		},
 		Database: Database{
 			URL:      p.required("JS_DATABASE_URL"),
@@ -122,6 +127,9 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if cfg.API.MinScheduleInterval < time.Second {
 		p.fail("JS_MIN_SCHEDULE_INTERVAL", "must be at least 1s")
+	}
+	if cfg.API.ShedLowAfter <= 0 || cfg.API.ShedNormalAfter < cfg.API.ShedLowAfter {
+		p.fail("JS_SHED_NORMAL_AFTER", "must be at least JS_SHED_LOW_AFTER, which must be positive")
 	}
 	if err := errors.Join(p.errs...); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration:\n%w", err)

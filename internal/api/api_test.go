@@ -36,6 +36,7 @@ type env struct {
 	t      *testing.T
 	pool   *pgxpool.Pool
 	store  *postgres.Store
+	api    *Server
 	srv    *httptest.Server
 	tenant domain.TenantID
 	admin  string
@@ -52,10 +53,11 @@ func newEnv(t *testing.T, rate float64) *env {
 	if err := store.EnsurePartitions(ctx, time.Now(), 2); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(store, slog.New(slog.DiscardHandler), Config{TenantRateLimit: rate}).Handler())
+	apiServer := New(store, slog.New(slog.DiscardHandler), Config{TenantRateLimit: rate})
+	srv := httptest.NewServer(apiServer.Handler())
 	t.Cleanup(srv.Close)
 
-	e := &env{t: t, pool: pool, store: store, srv: srv}
+	e := &env{t: t, pool: pool, store: store, api: apiServer, srv: srv}
 	e.tenant, e.admin = e.newTenant("acme")
 	e.call("POST", "/v1/job-types", e.admin, `{"name": "email.send"}`).want(http.StatusCreated)
 	return e

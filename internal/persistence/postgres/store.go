@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,9 @@ type Store struct {
 	pool           *pgxpool.Pool
 	rnd            func() float64
 	idempotencyTTL time.Duration
+
+	satMu            sync.Mutex
+	lastEmptyAcquire int64
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {

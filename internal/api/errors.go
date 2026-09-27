@@ -51,6 +51,8 @@ func toAPIError(err error) *apiError {
 		return newError(http.StatusUnprocessableEntity, "idempotency_key_reused", "idempotency key was used with a different request body")
 	case errors.Is(err, domain.ErrIdempotencyInProgress):
 		return newError(http.StatusConflict, "idempotency_in_progress", "a request with this idempotency key is still in progress")
+	case errors.Is(err, domain.ErrQuotaExceeded):
+		return newError(http.StatusTooManyRequests, "quota_exceeded", "the tenant's quota does not allow this request")
 	}
 	return errInternal
 }

@@ -102,12 +102,12 @@ func (a *authenticator) authenticate(ctx context.Context, header string) (princi
 	return p, nil
 }
 
-// rateLimiter is a token bucket per tenant for this node (LLD §9.6).
+// rateLimiter is a token bucket per tenant for this node (LLD §9.6); each tenant has its own
+// rate, with a burst of twice the rate.
 type rateLimiter struct {
-	rate, burst float64
-	now         func() time.Time
-	mu          sync.Mutex
-	buckets     map[domain.TenantID]*bucket
+	now     func() time.Time
+	mu      sync.Mutex
+	buckets map[domain.TenantID]*bucket
 }
 
 type bucket struct {
@@ -115,25 +115,25 @@ type bucket struct {
 	last   time.Time
 }
 
-func newRateLimiter(rate float64, now func() time.Time) *rateLimiter {
-	return &rateLimiter{rate: rate, burst: 2 * rate, now: now, buckets: map[domain.TenantID]*bucket{}}
+func newRateLimiter(now func() time.Time) *rateLimiter {
+	return &rateLimiter{now: now, buckets: map[domain.TenantID]*bucket{}}
 }
 
-// allow takes a token for tenant, or reports how long until one is available.
-func (l *rateLimiter) allow(tenant domain.TenantID) (bool, time.Duration) {
+// allow takes a token for tenant at rate per second, or reports how long until one is available.
+func (l *rateLimiter) allow(tenant domain.TenantID, rate float64) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	now := l.now()
+	now, burst := l.now(), 2*rate
 	b, ok := l.buckets[tenant]
 	if !ok {
-		b = &bucket{tokens: l.burst, last: now}
+		b = &bucket{tokens: burst, last: now}
 		l.buckets[tenant] = b
 	}
-	b.tokens = min(l.burst, b.tokens+now.Sub(b.last).Seconds()*l.rate)
+	b.tokens = min(burst, b.tokens+now.Sub(b.last).Seconds()*rate)
 	b.last = now
 	if b.tokens >= 1 {
 		b.tokens--
 		return true, 0
 	}
-	return false, time.Duration((1 - b.tokens) / l.rate * float64(time.Second))
+	return false, time.Duration((1 - b.tokens) / rate * float64(time.Second))
 }

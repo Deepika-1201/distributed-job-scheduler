@@ -158,7 +158,7 @@ func (p *pool) caps(ctx context.Context) (*capState, error) {
 	for t := range caps {
 		tenants = append(tenants, t)
 	}
-	running, err := p.d.store.RunningCounts(ctx, tenants)
+	running, err := p.d.store.RunningCounts(ctx, p.name, tenants)
 	if err != nil {
 		return nil, err
 	}

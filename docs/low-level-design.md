@@ -434,7 +434,7 @@ Any other starting state gets `409` with the current state. Each operation write
 ### 9.6 Admission control (phase 4 part)
 
 - Each `api` node runs a token bucket per tenant. The rate is `JS_TENANT_RATE_LIMIT ÷ JS_API_REPLICAS` per second (default 500 ÷ 1), with a burst of twice that ([ADR-011](decisions/ADR-011-caching-and-redis.md)).
-- Pending-job quotas and priority-based global shedding come in phase 12.
+- Pending-job quotas and priority-based shedding: see §15.
 
 ### 9.7 Listing jobs
 
@@ -628,7 +628,7 @@ Implements HLD §12 and [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.m
 ### 12.2 Sessions (phase 8 migration)
 
 - **`worker_sessions`:** `id`, `pool`, `worker_id`, `job_types text[]`, `slots`, `labels`, `runtime_version`, `state` (`ACTIVE`, `CLOSED`, `EXPIRED`), `created_at`, `heartbeat_at`, `lease_expires_at`, `closed_at`.
-- **`tenants.max_running`:** optional per-tenant cap on running jobs across pools; `NULL` means unlimited. It is set by SQL until quotas get an API in phase 12.
+- **`tenants.max_running`:** optional per-tenant cap on running jobs in each pool; `NULL` means unlimited. Managed through the quotas API (§15).
 - **Index:** `jobs (tenant_id) WHERE state = 'RUNNING'` serves cap counting.
 - **Heartbeats** update the session row directly: one write per worker every 5 s, 200 writes/s for 1,000 workers. Batching renewals per engine (HLD §12.2) is a phase 14 optimization.
 
@@ -797,3 +797,54 @@ Implements FR-10 (trigger) and FR-21 ([ADR-017](decisions/ADR-017-platform-admin
 - **Store:** pool and job-type holds block claims until resumed; drain reaches heartbeats; draining sessions get no assignments; trigger creates a due job.
 - **API:** role enforcement (tenant admin → `403`); a platform-admin mints a platform-admin key but a tenant admin cannot; pool and worker listings; job-type pause.
 - **End to end:** a drained SDK worker finishes its running job, deregisters, and `Run` returns `ErrDrained`.
+
+## 15. Quotas and load shedding
+
+Implements FR-16 and FR-17 ([ADR-018](decisions/ADR-018-quotas-and-load-shedding.md)). It replaces the "phase 12" note in §9.6.
+
+### 15.1 Schema (phase 12 migration, part 2)
+
+- **New columns on `tenants`:** `rate_limit`, `max_pending`, `max_schedules`, `min_schedule_interval_ms` and `max_payload_bytes`. All are nullable, and `NULL` means the platform default.
+- **Changed meaning of `max_running`:** it now applies to each pool separately, since dispatch runs per pool.
+
+### 15.2 API
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /v1/quotas` | viewer | The caller's effective quotas; `null` means unlimited |
+| `GET /v1/tenants` | platform-admin | Up to 1,000 tenants, by name |
+| `GET /v1/tenants/{id}/quotas` | platform-admin | Configured values; `null` means the default |
+| `PUT /v1/tenants/{id}/quotas` | platform-admin | Replaces every field; audited as `tenant.quotas` |
+
+**Validation:**
+
+- `rate_limit` is in (0, 1,000,000].
+- `max_pending` is at most 1,000,000.
+- The other counts are at least 1.
+- `min_schedule_interval` is between 1 s and 24 h.
+- `max_payload_bytes` is between 1 and 65,536.
+
+### 15.3 Enforcement
+
+Order on `POST /v1/jobs`:
+
+1. Authentication and role.
+2. The tenant's rate limit.
+3. Payload size (`413`).
+4. Validation (`422`).
+5. Shedding by priority and pool (`503`).
+6. The pending-jobs quota (`429`).
+
+**Caching on each `api` node:**
+
+- Quotas are cached per tenant for 30 s.
+- The pending count is `SELECT count(*) FROM (SELECT 1 FROM jobs WHERE tenant_id = $1 LIMIT max_pending)`, cached for 5 s.
+- The backlog sample is refreshed at most every 2 s, by whichever request finds it stale.
+
+### 15.4 Tests
+
+- **Store:** quotas round-trip; the pending count is bounded; the schedule quota is enforced; running caps are per pool; backlog ages.
+- **API:**
+  - per-tenant rate limit, payload limit, pending quota and schedule quota;
+  - shedding rejects `LOW` then `NORMAL` but never `HIGH`;
+  - `GET /v1/quotas`, and platform-admin quota management with its validation.

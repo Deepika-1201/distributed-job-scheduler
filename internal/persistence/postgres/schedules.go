@@ -91,6 +91,9 @@ func (s *Store) CreateSchedule(ctx context.Context, sc domain.Schedule, audit Au
 	}
 	var created domain.Schedule
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockTenantForScheduleQuota(ctx, tx, tenant); err != nil {
+			return err
+		}
 		var now time.Time
 		if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
 			return err

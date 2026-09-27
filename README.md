@@ -10,7 +10,7 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 |---|---|
 | [High-level design](docs/architecture.md) | Requirements, architecture, failure scenarios, deployment |
 | [Low-level design](docs/low-level-design.md) | Code structure, state machines, algorithms (grows each phase) |
-| [Decision records](docs/decisions/) | ADR-001 to ADR-017, one decision per file |
+| [Decision records](docs/decisions/) | ADR-001 to ADR-018, one decision per file |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
 
 ## Quick start
@@ -48,6 +48,7 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 | `JS_HTTP_ADDR` / `JS_OPS_ADDR` | `:8080` / `:9090` |
 | `JS_TENANT_RATE_LIMIT` / `JS_API_REPLICAS` | `500` / `1` |
 | `JS_MIN_SCHEDULE_INTERVAL` | `1m` |
+| `JS_SHED_LOW_AFTER` / `JS_SHED_NORMAL_AFTER` | `5m` / `15m` (pool backlog age that sheds `LOW` / `NORMAL` submissions) |
 | `JS_WORKER_TOKEN` | required for `engine` (≥ 16 chars) |
 | `JS_WORKER_ADDR` / `JS_WORKER_ADVERTISE_ADDR` | `:7070` / the listen address |
 | `JS_NODE_ID` | hostname + random suffix |

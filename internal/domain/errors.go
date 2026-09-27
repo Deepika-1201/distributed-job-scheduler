@@ -13,4 +13,6 @@ var (
 	ErrIdempotencyInProgress = errors.New("a request with this idempotency key is still in progress")
 	// ErrLeaseLost reports that a node no longer holds a lease it acted under, e.g. after a takeover.
 	ErrLeaseLost = errors.New("lease lost")
+	// ErrQuotaExceeded rejects a request that would exceed one of the tenant's quotas (ADR-018).
+	ErrQuotaExceeded = errors.New("quota exceeded")
 )

@@ -245,8 +245,12 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, p princi
 	if err := fe.err(); err != nil {
 		return err
 	}
-	if len(req.Payload) > maxPayloadBytes {
-		return errPayloadTooLarge
+	quotas, err := s.admission.tenantQuotas(r.Context(), p.Tenant)
+	if err != nil {
+		return err
+	}
+	if limit := s.admission.payloadLimit(quotas); len(req.Payload) > limit {
+		return payloadTooLarge(limit)
 	}
 	jt, err := s.store.GetJobType(r.Context(), p.Tenant, *req.JobType)
 	if errors.Is(err, domain.ErrNotFound) {
@@ -259,7 +263,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, p princi
 		TenantID: p.Tenant, JobType: jt.Name, Payload: []byte("{}"), Misfire: domain.MisfireFireOnce,
 		Overlap: domain.OverlapSkip, CreatedBy: "api_key:" + p.KeyID,
 	}
-	req.apply(&sc, fe, s.now(), s.minScheduleInterval)
+	req.apply(&sc, fe, s.now(), s.admission.minInterval(quotas))
 	if err := fe.err(); err != nil {
 		return err
 	}
@@ -313,14 +317,18 @@ func (s *Server) patchSchedule(w http.ResponseWriter, r *http.Request, p princip
 	if req.JobType != nil {
 		return fieldErrors{"job_type": "cannot be changed; create a new schedule"}.err()
 	}
-	if len(req.Payload) > maxPayloadBytes {
-		return errPayloadTooLarge
+	quotas, err := s.admission.tenantQuotas(r.Context(), p.Tenant)
+	if err != nil {
+		return err
 	}
-	now := s.now()
+	if limit := s.admission.payloadLimit(quotas); len(req.Payload) > limit {
+		return payloadTooLarge(limit)
+	}
+	now, minInterval := s.now(), s.admission.minInterval(quotas)
 	sc, err := s.store.UpdateSchedule(r.Context(), p.Tenant, domain.ScheduleID(r.PathValue("id")), s.audit(r, p),
 		func(sc *domain.Schedule) error {
 			fe := fieldErrors{}
-			req.apply(sc, fe, now, s.minScheduleInterval)
+			req.apply(sc, fe, now, minInterval)
 			return fe.err()
 		})
 	if err != nil {

@@ -194,12 +194,16 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request, p principal) 
 // resolveSubmission validates a request and fills in the job type's defaults (LLD §9.4).
 func (s *Server) resolveSubmission(r *http.Request, p principal, req submitJobRequest) (postgres.NewJob, error) {
 	fe := fieldErrors{}
+	quotas, err := s.admission.tenantQuotas(r.Context(), p.Tenant)
+	if err != nil {
+		return postgres.NewJob{}, err
+	}
 	payload := []byte(req.Payload)
 	if len(payload) == 0 {
 		payload = []byte("{}")
 	}
-	if len(payload) > maxPayloadBytes {
-		return postgres.NewJob{}, errPayloadTooLarge
+	if limit := s.admission.payloadLimit(quotas); len(payload) > limit {
+		return postgres.NewJob{}, payloadTooLarge(limit)
 	}
 	validateLabels(req.Labels, fe)
 	if len(req.DedupeKey) > 255 {
@@ -255,6 +259,12 @@ func (s *Server) resolveSubmission(r *http.Request, p principal, req submitJobRe
 	if priority == domain.PriorityCritical && !p.Role.Includes(domain.RoleOperator) {
 		return postgres.NewJob{}, errPermission("CRITICAL priority requires the operator role")
 	}
+	if err := s.admission.shed(r.Context(), jt.Pool, priority); err != nil {
+		return postgres.NewJob{}, err
+	}
+	if err := s.admission.checkPending(r.Context(), p.Tenant, quotas); err != nil {
+		return postgres.NewJob{}, err
+	}
 
 	nj := postgres.NewJob{
 		TenantID: p.Tenant, Type: jt.Name, TypeVersion: jt.Version, Pool: jt.Pool, Priority: priority,
@@ -290,7 +300,9 @@ type cursorBody struct {
 	ID        string    `json:"id"`
 }
 
-var errPayloadTooLarge = newError(http.StatusRequestEntityTooLarge, "payload_too_large", "payload exceeds %d bytes", maxPayloadBytes)
+func payloadTooLarge(limit int) error {
+	return newError(http.StatusRequestEntityTooLarge, "payload_too_large", "payload exceeds the tenant's limit of %d bytes", limit)
+}
 
 func validateLabels(labels map[string]string, fe fieldErrors) {
 	if len(labels) > 16 {
