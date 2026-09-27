@@ -18,7 +18,7 @@ Builds the design in [architecture.md](architecture.md) incrementally. Each phas
 | 9 | Retries and recovery | Retry integration, reaper (with warm-up), timeouts, dead-letter, re-drive, bulk operations | Recovery tests for worker crash, timeout and poison jobs | Done |
 | 10 | Failure testing | Fault-injection suite covering HLD scenarios S1–S14 | Every scenario automated or documented as manual | |
 | 11 | Observability | OpenTelemetry traces and metrics, dashboards, alerts, local telemetry stack | A job traceable end to end; metrics from HLD §17.3 exported | |
-| 12 | Security hardening | Complete RBAC, key rotation, TLS, worker credentials, row-level security decision, security tests | OWASP checklist; tenant-isolation tests | |
+| 12 | Security hardening | Complete RBAC, key rotation, TLS, worker credentials, row-level security decision, security tests | OWASP checklist; tenant-isolation tests | In progress: platform-admin role and administration ([ADR-017](decisions/ADR-017-platform-administration.md)), quotas and shedding ([ADR-018](decisions/ADR-018-quotas-and-load-shedding.md)), payload schemas ([ADR-019](decisions/ADR-019-payload-json-schema.md)) done. Remaining: key rotation, TLS, per-pool worker tokens, RLS decision |
 | 13 | Deployment | Runtime decision (ADR-010), Terraform, CI/CD, runbooks | On-demand environment created and destroyed from CI | |
 | 14 | Load testing and tuning | Tier M scenarios | Capacity report against NFR-1 to NFR-4 | |
 | 15 | Production readiness review | Checklist from the original brief (§39) | Review passed | |
