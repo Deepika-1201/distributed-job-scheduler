@@ -16,6 +16,11 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      # Embedded PostgreSQL binaries (internal/pgtest); go.sum pins their version.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/jobscheduler/pgtest
+          key: pgtest-${{ runner.os }}-${{ hashFiles('go.sum') }}
       - run: make lint
       - run: make test-race
       - run: make build

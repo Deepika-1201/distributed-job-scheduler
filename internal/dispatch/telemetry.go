@@ -111,7 +111,7 @@ func (p *pool) sampleGauges() {
 }
 
 // sample reads the pool's gauges and records its dispatchable backlog, which api nodes shed
-// on (ADR-021).
+// on (ADR-021). The backlog is recorded first, so admission never lags what metrics show.
 func (p *pool) sample() error {
 	cs, err := p.caps(p.ctx)
 	if err != nil {
@@ -121,12 +121,11 @@ func (p *pool) sample() error {
 	if err != nil {
 		return err
 	}
-	p.gauges.Store(&g)
-	lease, ok := p.d.leases.Lease(p.lease.Name)
-	if !ok {
-		return nil
+	if lease, ok := p.d.leases.Lease(p.lease.Name); ok {
+		err = p.d.store.RecordPoolBacklog(p.ctx, lease, p.name, g.OldestDue)
 	}
-	return p.d.store.RecordPoolBacklog(p.ctx, lease, p.name, g.OldestDue)
+	p.gauges.Store(&g)
+	return err
 }
 
 // recordDispatch measures READY to attempt start for jobs handed to a worker; both times
