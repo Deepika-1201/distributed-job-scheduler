@@ -16,8 +16,9 @@ type JobType struct {
 	AttemptTimeout  time.Duration
 	RetryPolicy     RetryPolicy
 	AtMostOnce      bool
-	Enabled         bool // false rejects submissions and holds schedules
-	Paused          bool // true holds dispatch; submissions and schedules continue
+	PayloadSchema   []byte // JSON Schema for payloads; nil means any JSON (ADR-019)
+	Enabled         bool   // false rejects submissions and holds schedules
+	Paused          bool   // true holds dispatch; submissions and schedules continue
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }

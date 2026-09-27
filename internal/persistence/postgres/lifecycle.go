@@ -175,6 +175,8 @@ type JobFilter struct {
 	After      *JobCursor
 	// ActiveOnly skips finished jobs, whatever State says.
 	ActiveOnly bool
+	// CreatedAfter (inclusive) and CreatedBefore (exclusive) bound created_at; zero means unbounded.
+	CreatedAfter, CreatedBefore time.Time
 }
 
 // JobCursor marks the last job of a page in (created_at, id) descending order.
@@ -189,6 +191,8 @@ const listWhere = ` WHERE tenant_id = $1
   AND ($4::jsonb IS NULL OR labels @> $4)
   AND ($5::timestamptz IS NULL OR (created_at, id) < ($5, $6::uuid))
   AND ($8::uuid IS NULL OR schedule_id = $8)
+  AND ($9::timestamptz IS NULL OR created_at >= $9)
+  AND ($10::timestamptz IS NULL OR created_at < $10)
 ORDER BY created_at DESC, id DESC
 LIMIT $7`
 
@@ -220,7 +224,8 @@ func (s *Store) ListJobs(ctx context.Context, tenantID domain.TenantID, f JobFil
 		}
 		schedule = &id
 	}
-	args := []any{tenant, nullText(string(f.State)), nullText(f.Type), label, afterTime, afterID, f.Limit + 1, schedule}
+	args := []any{tenant, nullText(string(f.State)), nullText(f.Type), label, afterTime, afterID, f.Limit + 1, schedule,
+		nullTime(f.CreatedAfter), nullTime(f.CreatedBefore)}
 
 	var jobs []domain.Job
 	for _, src := range []struct {
@@ -263,8 +268,10 @@ func (s *Store) ListAttempts(ctx context.Context, tenantID domain.TenantID, id d
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, number, session_id, state, retryable, error, started_at, deadline, finished_at, actor
-		FROM attempts WHERE job_id = $1 AND tenant_id = $2 ORDER BY number`, string(job.ID), string(job.TenantID))
+		SELECT a.id, a.number, a.session_id, ws.worker_id, a.state, a.retryable, a.error, a.started_at, a.deadline,
+		    a.finished_at, a.actor
+		FROM attempts a LEFT JOIN worker_sessions ws ON ws.id = a.session_id
+		WHERE a.job_id = $1 AND a.tenant_id = $2 ORDER BY a.number`, string(job.ID), string(job.TenantID))
 	if err != nil {
 		return nil, err
 	}
@@ -272,11 +279,12 @@ func (s *Store) ListAttempts(ctx context.Context, tenantID domain.TenantID, id d
 		var (
 			a                 domain.Attempt
 			attemptID, sessID pgtype.UUID
+			worker            pgtype.Text
 			state, actor      string
 			errText           pgtype.Text
 		)
-		err := r.Scan(&attemptID, &a.Number, &sessID, &state, &a.Retryable, &errText, &a.StartedAt, &a.Deadline, &a.FinishedAt, &actor)
-		a.ID, a.SessionID = domain.AttemptID(uuidString(attemptID)), domain.SessionID(uuidString(sessID))
+		err := r.Scan(&attemptID, &a.Number, &sessID, &worker, &state, &a.Retryable, &errText, &a.StartedAt, &a.Deadline, &a.FinishedAt, &actor)
+		a.ID, a.SessionID, a.WorkerID = domain.AttemptID(uuidString(attemptID)), domain.SessionID(uuidString(sessID)), worker.String
 		a.JobID, a.TenantID = job.ID, job.TenantID
 		a.State, a.Actor, a.Error = domain.AttemptState(state), domain.Actor(actor), errText.String
 		return a, err
@@ -285,8 +293,12 @@ func (s *Store) ListAttempts(ctx context.Context, tenantID domain.TenantID, id d
 		return nil, err
 	}
 	if c := job.Current; c != nil {
+		var worker pgtype.Text
+		if err := s.pool.QueryRow(ctx, `SELECT worker_id FROM worker_sessions WHERE id = $1`, string(c.SessionID)).Scan(&worker); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
 		attempts = append(attempts, domain.Attempt{
-			ID: c.ID, JobID: job.ID, TenantID: job.TenantID, Number: c.Number, SessionID: c.SessionID,
+			ID: c.ID, JobID: job.ID, TenantID: job.TenantID, Number: c.Number, SessionID: c.SessionID, WorkerID: worker.String,
 			State: domain.AttemptRunning, StartedAt: c.StartedAt, Deadline: c.Deadline,
 		})
 	}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"regexp"
 	"time"
@@ -11,13 +12,14 @@ import (
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,99}$`)
 
 type jobTypeRequest struct {
-	Name            string           `json:"name"`
-	Pool            *string          `json:"pool"`
-	DefaultPriority *string          `json:"default_priority"`
-	AttemptTimeout  *string          `json:"attempt_timeout"`
-	RetryPolicy     *retryPolicyBody `json:"retry_policy"`
-	AtMostOnce      *bool            `json:"at_most_once"`
-	Enabled         *bool            `json:"enabled"`
+	Name            string                    `json:"name"`
+	Pool            *string                   `json:"pool"`
+	DefaultPriority *string                   `json:"default_priority"`
+	AttemptTimeout  *string                   `json:"attempt_timeout"`
+	RetryPolicy     *retryPolicyBody          `json:"retry_policy"`
+	AtMostOnce      *bool                     `json:"at_most_once"`
+	Enabled         *bool                     `json:"enabled"`
+	PayloadSchema   optional[json.RawMessage] `json:"payload_schema"`
 }
 
 type jobTypeResponse struct {
@@ -28,6 +30,7 @@ type jobTypeResponse struct {
 	AttemptTimeout  string           `json:"attempt_timeout"`
 	RetryPolicy     *retryPolicyBody `json:"retry_policy"`
 	AtMostOnce      bool             `json:"at_most_once"`
+	PayloadSchema   json.RawMessage  `json:"payload_schema,omitempty"`
 	Enabled         bool             `json:"enabled"`
 	Paused          bool             `json:"paused"`
 	CreatedAt       time.Time        `json:"created_at"`
@@ -38,13 +41,22 @@ func toJobTypeResponse(jt domain.JobType) jobTypeResponse {
 	return jobTypeResponse{
 		Name: jt.Name, Version: jt.Version, Pool: jt.Pool, DefaultPriority: jt.DefaultPriority,
 		AttemptTimeout: jt.AttemptTimeout.String(), RetryPolicy: policyBody(jt.RetryPolicy),
-		AtMostOnce: jt.AtMostOnce, Enabled: jt.Enabled, Paused: jt.Paused, CreatedAt: jt.CreatedAt, UpdatedAt: jt.UpdatedAt,
+		AtMostOnce: jt.AtMostOnce, PayloadSchema: jt.PayloadSchema, Enabled: jt.Enabled, Paused: jt.Paused, CreatedAt: jt.CreatedAt, UpdatedAt: jt.UpdatedAt,
 	}
 }
 
 // applyTo overlays the fields present in the request onto jt and validates the result.
 func (req jobTypeRequest) applyTo(jt domain.JobType) (domain.JobType, error) {
 	fe := fieldErrors{}
+	if req.PayloadSchema.Set {
+		jt.PayloadSchema = nil
+		if v := req.PayloadSchema.Value; v != nil && string(*v) != "null" {
+			if _, err := compileSchema(*v); err != nil {
+				fe.add("payload_schema", "%s", err.Error())
+			}
+			jt.PayloadSchema = *v
+		}
+	}
 	if req.Pool != nil {
 		jt.Pool = *req.Pool
 	}

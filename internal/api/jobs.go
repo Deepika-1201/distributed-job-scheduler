@@ -83,6 +83,8 @@ type attemptResponse struct {
 	ID         string              `json:"id"`
 	Number     int                 `json:"number"`
 	State      domain.AttemptState `json:"state"`
+	SessionID  string              `json:"session_id,omitempty"`
+	WorkerID   string              `json:"worker_id,omitempty"`
 	StartedAt  time.Time           `json:"started_at"`
 	Deadline   time.Time           `json:"deadline"`
 	FinishedAt *time.Time          `json:"finished_at,omitempty"`
@@ -256,6 +258,9 @@ func (s *Server) resolveSubmission(r *http.Request, p principal, req submitJobRe
 	if err := fe.err(); err != nil {
 		return postgres.NewJob{}, err
 	}
+	if err := s.validatePayload(jt, payload); err != nil {
+		return postgres.NewJob{}, err
+	}
 	if priority == domain.PriorityCritical && !p.Role.Includes(domain.RoleOperator) {
 		return postgres.NewJob{}, errPermission("CRITICAL priority requires the operator role")
 	}
@@ -368,6 +373,15 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, p principal) e
 	if f.Limit, after = parsePage(q, fe); after != nil {
 		f.After = &postgres.JobCursor{CreatedAt: after.CreatedAt, ID: domain.JobID(after.ID)}
 	}
+	for param, dst := range map[string]*time.Time{"created_after": &f.CreatedAfter, "created_before": &f.CreatedBefore} {
+		if v := q.Get(param); v != "" {
+			t, err := time.Parse(time.RFC3339Nano, v)
+			if err != nil {
+				fe.add(param, "must be an RFC 3339 time")
+			}
+			*dst = t
+		}
+	}
 	if err := fe.err(); err != nil {
 		return err
 	}
@@ -395,7 +409,8 @@ func (s *Server) listAttempts(w http.ResponseWriter, r *http.Request, p principa
 	resp := listResponse[attemptResponse]{Items: make([]attemptResponse, 0, len(attempts))}
 	for _, a := range attempts {
 		resp.Items = append(resp.Items, attemptResponse{
-			ID: string(a.ID), Number: a.Number, State: a.State, StartedAt: a.StartedAt, Deadline: a.Deadline,
+			ID: string(a.ID), Number: a.Number, State: a.State, SessionID: string(a.SessionID), WorkerID: a.WorkerID,
+			StartedAt: a.StartedAt, Deadline: a.Deadline,
 			FinishedAt: optTime(a.FinishedAt), Error: a.Error, Retryable: a.Retryable,
 		})
 	}

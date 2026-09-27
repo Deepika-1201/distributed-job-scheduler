@@ -267,6 +267,9 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, p princi
 	if err := fe.err(); err != nil {
 		return err
 	}
+	if err := s.validatePayload(jt, sc.Payload); err != nil {
+		return err
+	}
 	created, err := s.store.CreateSchedule(r.Context(), sc, s.audit(r, p))
 	if err != nil {
 		return err
@@ -329,7 +332,14 @@ func (s *Server) patchSchedule(w http.ResponseWriter, r *http.Request, p princip
 		func(sc *domain.Schedule) error {
 			fe := fieldErrors{}
 			req.apply(sc, fe, now, minInterval)
-			return fe.err()
+			if err := fe.err(); err != nil || req.Payload == nil {
+				return err
+			}
+			jt, err := s.store.GetJobType(r.Context(), p.Tenant, sc.JobType)
+			if err != nil {
+				return err
+			}
+			return s.validatePayload(jt, sc.Payload)
 		})
 	if err != nil {
 		return err

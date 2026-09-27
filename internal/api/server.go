@@ -41,6 +41,7 @@ type Server struct {
 	auth      *authenticator
 	limiter   *rateLimiter
 	admission *admission
+	schemas   *schemaCache
 	now       func() time.Time
 	mux       *http.ServeMux
 	routes    []string
@@ -50,6 +51,7 @@ func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
 	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux()}
 	s.auth = newAuthenticator(store, s.now)
 	s.limiter = newRateLimiter(s.now)
+	s.schemas = &schemaCache{}
 	s.admission = &admission{store: store, now: s.now, defaultRate: cfg.TenantRateLimit, replicas: max(cfg.Replicas, 1),
 		defaultMinInterval: cmp.Or(cfg.MinScheduleInterval, time.Minute),
 		shedLow:            cmp.Or(cfg.ShedLowAfter, 5*time.Minute), shedNormal: cmp.Or(cfg.ShedNormalAfter, 15*time.Minute), quotaTTL: defaultQuotaTTL, pendingTTL: defaultPendingTTL, backlogTTL: defaultBacklogTTL, quotas: map[domain.TenantID]cached[domain.Quotas]{}, pending: map[domain.TenantID]cached[int]{}}

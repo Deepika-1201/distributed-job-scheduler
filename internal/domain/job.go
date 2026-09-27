@@ -66,6 +66,7 @@ type Attempt struct {
 	TenantID   TenantID
 	Number     int
 	SessionID  SessionID
+	WorkerID   string // the session's worker; empty once the session is purged
 	State      AttemptState
 	Retryable  bool
 	Error      string

@@ -848,3 +848,16 @@ Order on `POST /v1/jobs`:
   - per-tenant rate limit, payload limit, pending quota and schedule quota;
   - shedding rejects `LOW` then `NORMAL` but never `HIGH`;
   - `GET /v1/quotas`, and platform-admin quota management with its validation.
+
+## 16. Payload schemas and listing details
+
+### 16.1 Payload schemas (FR-1, [ADR-019](decisions/ADR-019-payload-json-schema.md))
+
+- **Field:** `payload_schema` on job type create and `PATCH`. It is at most 64 KiB, and `null` in a `PATCH` removes it.
+- **Compilation:** a compiler with a loader that rejects every external reference, so only `#`-relative `$ref`s resolve. A compile error is a `422` on `payload_schema`.
+- **Validation:** at submission, and on schedule create and update. It uses the compiled schema cached for `(tenant, type, updated_at)`, holding up to 1,000 entries per node. Violations are a `422` on `payload`, with the error text truncated to 1 KiB.
+
+### 16.2 Listing and attempts (FR-3, FR-8)
+
+- `GET /v1/jobs` accepts `created_after` (inclusive) and `created_before` (exclusive), as RFC 3339 times.
+- Attempts include `session_id` and the session's `worker_id`, which is `null` once the session row has been purged.

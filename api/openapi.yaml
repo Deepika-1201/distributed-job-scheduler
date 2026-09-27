@@ -66,6 +66,8 @@ paths:
         - { name: state, in: query, schema: { $ref: "#/components/schemas/JobState" } }
         - { name: type, in: query, schema: { type: string } }
         - { name: schedule_id, in: query, schema: { type: string, format: uuid } }
+        - { name: created_after, in: query, description: Inclusive lower bound on created_at, schema: { type: string, format: date-time } }
+        - { name: created_before, in: query, description: Exclusive upper bound on created_at, schema: { type: string, format: date-time } }
         - { name: label, in: query, description: "key:value", schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
         - { name: cursor, in: query, schema: { type: string } }
@@ -304,6 +306,7 @@ components:
         attempt_timeout: { $ref: "#/components/schemas/Duration" }
         retry_policy: { $ref: "#/components/schemas/RetryPolicy" }
         at_most_once: { type: boolean }
+        payload_schema: { type: [object, "null"], description: "JSON Schema (draft 2020-12 by default) for payloads; only #-relative $refs; null removes it (ADR-019)" }
         enabled: { type: boolean }
     JobType:
       type: object
@@ -315,6 +318,7 @@ components:
         attempt_timeout: { $ref: "#/components/schemas/Duration" }
         retry_policy: { $ref: "#/components/schemas/RetryPolicy" }
         at_most_once: { type: boolean }
+        payload_schema: { type: object }
         enabled: { type: boolean, description: false rejects submissions and holds schedules }
         paused: { type: boolean, description: true holds dispatch; submissions and schedules continue }
         created_at: { type: string, format: date-time }
@@ -344,6 +348,8 @@ components:
         id: { type: string, format: uuid }
         number: { type: integer, description: Also the attempt's fencing token }
         state: { type: string, enum: [RUNNING, SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, LOST] }
+        session_id: { type: string, format: uuid, description: The worker session that ran the attempt }
+        worker_id: { type: string, description: "The worker's self-reported ID, while its session is retained" }
         started_at: { type: string, format: date-time }
         deadline: { type: string, format: date-time }
         finished_at: { type: string, format: date-time }

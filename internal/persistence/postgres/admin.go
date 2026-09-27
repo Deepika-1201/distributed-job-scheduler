@@ -30,6 +30,14 @@ func writeAudit(ctx context.Context, tx pgx.Tx, tenant string, a Audit, action, 
 
 func newID() string { return uuid.Must(uuid.NewV7()).String() }
 
+// schemaParam passes a JSON Schema as jsonb, or NULL when there is none.
+func schemaParam(schema []byte) any {
+	if len(schema) == 0 {
+		return nil
+	}
+	return string(schema)
+}
+
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
@@ -107,7 +115,7 @@ func (s *Store) RevokeAPIKey(ctx context.Context, tenantID domain.TenantID, id s
 }
 
 const jobTypeColumns = `tenant_id, name, version, pool, default_priority, attempt_timeout_ms, retry_policy,
-	at_most_once, enabled, paused, created_at, updated_at`
+	at_most_once, enabled, paused, payload_schema, created_at, updated_at`
 
 func scanJobType(row pgx.Row) (domain.JobType, error) {
 	var (
@@ -118,7 +126,7 @@ func scanJobType(row pgx.Row) (domain.JobType, error) {
 		policy    retryPolicyJSON
 	)
 	err := row.Scan(&tenant, &jt.Name, &jt.Version, &jt.Pool, &priority, &timeoutMS, &policy,
-		&jt.AtMostOnce, &jt.Enabled, &jt.Paused, &jt.CreatedAt, &jt.UpdatedAt)
+		&jt.AtMostOnce, &jt.Enabled, &jt.Paused, &jt.PayloadSchema, &jt.CreatedAt, &jt.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.JobType{}, domain.ErrNotFound
 	}
@@ -135,11 +143,11 @@ func (s *Store) CreateJobType(ctx context.Context, jt domain.JobType, audit Audi
 		var err error
 		created, err = scanJobType(tx.QueryRow(ctx, `
 			INSERT INTO job_types (tenant_id, name, version, pool, default_priority, attempt_timeout_ms,
-			    retry_policy, at_most_once, enabled)
-			VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8)
+			    retry_policy, at_most_once, enabled, payload_schema)
+			VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9)
 			RETURNING `+jobTypeColumns,
 			string(jt.TenantID), jt.Name, jt.Pool, int16(jt.DefaultPriority), jt.AttemptTimeout.Milliseconds(),
-			policyToJSON(jt.RetryPolicy), jt.AtMostOnce, jt.Enabled))
+			policyToJSON(jt.RetryPolicy), jt.AtMostOnce, jt.Enabled, schemaParam(jt.PayloadSchema)))
 		if isUniqueViolation(err) {
 			return domain.ErrAlreadyExists
 		}
@@ -179,11 +187,11 @@ func (s *Store) UpdateJobType(ctx context.Context, jt domain.JobType, audit Audi
 		var err error
 		updated, err = scanJobType(tx.QueryRow(ctx, `
 			UPDATE job_types SET pool = $3, default_priority = $4, attempt_timeout_ms = $5, retry_policy = $6,
-			    at_most_once = $7, enabled = $8, updated_at = now()
+			    at_most_once = $7, enabled = $8, payload_schema = $9, updated_at = now()
 			WHERE tenant_id = $1 AND name = $2
 			RETURNING `+jobTypeColumns,
 			string(jt.TenantID), jt.Name, jt.Pool, int16(jt.DefaultPriority), jt.AttemptTimeout.Milliseconds(),
-			policyToJSON(jt.RetryPolicy), jt.AtMostOnce, jt.Enabled))
+			policyToJSON(jt.RetryPolicy), jt.AtMostOnce, jt.Enabled, schemaParam(jt.PayloadSchema)))
 		if err != nil {
 			return err
 		}
