@@ -133,16 +133,6 @@ func (s *Store) CloseSession(ctx context.Context, id domain.SessionID) error {
 	return err
 }
 
-// ActivePools lists the pools that have at least one live worker session.
-func (s *Store) ActivePools(ctx context.Context) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT pool FROM worker_sessions
-		WHERE state = 'ACTIVE' AND lease_expires_at > now() ORDER BY pool`)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, pgx.RowTo[string])
-}
-
 // ReadyPriorities reports which priority classes of a pool have claimable jobs.
 func (s *Store) ReadyPriorities(ctx context.Context, pool string) (map[domain.Priority]bool, error) {
 	rows, err := s.pool.Query(ctx, `

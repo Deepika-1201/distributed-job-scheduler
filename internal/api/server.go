@@ -34,9 +34,9 @@ type Config struct {
 	Replicas int
 	// MinScheduleInterval is the shortest schedule interval accepted; zero means 1 minute.
 	MinScheduleInterval time.Duration
-	// ShedLowAfter and ShedNormalAfter are the pool backlog ages at which LOW and NORMAL
-	// submissions are shed (ADR-018); zero means 5 and 15 minutes.
-	ShedLowAfter, ShedNormalAfter time.Duration
+	// BacklogTarget is the backlog target of pools without their own: LOW submissions are shed
+	// past it and NORMAL past three times it (ADR-021); zero means 5 minutes.
+	BacklogTarget time.Duration
 	// Addr is the listen address, whose port labels the HTTP metrics.
 	Addr string
 }
@@ -60,8 +60,9 @@ func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
 	s.limiter = newRateLimiter(s.now)
 	s.schemas = &schemaCache{}
 	s.admission = &admission{store: store, now: s.now, defaultRate: cfg.TenantRateLimit, replicas: max(cfg.Replicas, 1),
-		defaultMinInterval: cmp.Or(cfg.MinScheduleInterval, time.Minute),
-		shedLow:            cmp.Or(cfg.ShedLowAfter, 5*time.Minute), shedNormal: cmp.Or(cfg.ShedNormalAfter, 15*time.Minute), quotaTTL: defaultQuotaTTL, pendingTTL: defaultPendingTTL, backlogTTL: defaultBacklogTTL, quotas: map[domain.TenantID]cached[domain.Quotas]{}, pending: map[domain.TenantID]cached[int]{}}
+		defaultMinInterval: cmp.Or(cfg.MinScheduleInterval, time.Minute), backlogTarget: cmp.Or(cfg.BacklogTarget, 5*time.Minute),
+		quotaTTL: defaultQuotaTTL, pendingTTL: defaultPendingTTL, backlogTTL: defaultBacklogTTL,
+		quotas: map[domain.TenantID]cached[domain.Quotas]{}, pending: map[domain.TenantID]cached[int]{}}
 
 	s.handle("POST /v1/job-types", domain.RoleAdmin, s.createJobType)
 	s.handle("GET /v1/job-types", domain.RoleViewer, s.listJobTypes)
@@ -95,6 +96,7 @@ func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
 	s.handle("GET /v1/pools", domain.RolePlatformAdmin, s.listPools)
 	s.handle("POST /v1/pools/{name}/pause", domain.RolePlatformAdmin, s.poolAction(true))
 	s.handle("POST /v1/pools/{name}/resume", domain.RolePlatformAdmin, s.poolAction(false))
+	s.handle("PUT /v1/pools/{name}/settings", domain.RolePlatformAdmin, s.putPoolSettings)
 
 	s.handle("GET /v1/quotas", domain.RoleViewer, s.getOwnQuotas)
 	s.handle("GET /v1/tenants", domain.RolePlatformAdmin, s.listTenants)

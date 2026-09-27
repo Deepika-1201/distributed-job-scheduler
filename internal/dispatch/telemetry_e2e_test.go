@@ -67,6 +67,19 @@ func TestJobIsTracedAcrossTheQueue(t *testing.T) {
 	if n, ok := telemetrytest.Value(text, "jobs_ready", pool); !ok || n != 0 {
 		t.Errorf("jobs_ready%v = %v (reported %v), want 0 once claimed", pool, n, ok)
 	}
+	if n, _ := telemetrytest.Value(text, "pool_backlog_target_seconds", pool); n != 300 {
+		t.Errorf("pool_backlog_target_seconds%v = %v, want the 5-minute default", pool, n)
+	}
+	for _, reason := range postgres.HeldReasons {
+		if n, ok := telemetrytest.Value(text, "jobs_held", map[string]string{"pool": "traced", "reason": reason}); !ok || n != 0 {
+			t.Errorf("jobs_held{reason=%s} = %v (reported %v), want 0", reason, n, ok)
+		}
+	}
+	if backlogs, err := c.store.PoolBacklogs(ctx); err != nil || backlogs["traced"].Age != 0 {
+		t.Errorf("owner-recorded backlogs = %v, %v; want traced with nothing waiting", backlogs, err)
+	} else if _, ok := backlogs["traced"]; !ok {
+		t.Error("the owner did not record the pool's backlog for admission control")
+	}
 	close(release)
 	c.await(id, domain.StateSucceeded, 10*time.Second)
 

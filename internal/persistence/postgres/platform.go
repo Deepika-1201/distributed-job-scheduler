@@ -32,13 +32,15 @@ func (s *Store) SetJobTypePaused(ctx context.Context, tenantID domain.TenantID, 
 
 // PoolInfo is a pool's state for operators.
 type PoolInfo struct {
-	Name        string
-	Paused      bool
-	Owner       *Lease // nil while no node holds the pool's lease
-	Workers     int
-	Slots       int
-	ReadyJobs   int
-	RunningJobs int
+	Name          string
+	Paused        bool
+	Owner         *Lease // nil while no node holds the pool's lease
+	Workers       int
+	Slots         int
+	ReadyJobs     int
+	RunningJobs   int
+	BacklogTarget *time.Duration // nil means the platform default
+	BacklogAge    *time.Duration // from the owner's latest sample; nil when there is none within BacklogFreshness
 }
 
 // ListPools returns every pool known from job types, live sessions or pool rows.
@@ -52,11 +54,14 @@ func (s *Store) ListPools(ctx context.Context) ([]PoolInfo, error) {
 		    (SELECT count(*) FROM worker_sessions ws WHERE ws.pool = n.name AND ws.state = 'ACTIVE'),
 		    (SELECT COALESCE(sum(slots), 0) FROM worker_sessions ws WHERE ws.pool = n.name AND ws.state = 'ACTIVE'),
 		    (SELECT count(*) FROM jobs j WHERE j.pool = n.name AND j.state = 'READY'),
-		    (SELECT count(*) FROM jobs j WHERE j.pool = n.name AND j.state = 'RUNNING')
+		    (SELECT count(*) FROM jobs j WHERE j.pool = n.name AND j.state = 'RUNNING'),
+		    p.backlog_target_ms,
+		    CASE WHEN p.sampled_at > now() - make_interval(secs => $1)
+		        THEN extract(epoch FROM now() - COALESCE(p.oldest_due_at, now()))::float8 END
 		FROM names n
 		LEFT JOIN pools p ON p.name = n.name
 		LEFT JOIN leases l ON l.name = 'pool:' || n.name AND l.expires_at > now()
-		ORDER BY n.name`)
+		ORDER BY n.name`, BacklogFreshness.Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -67,10 +72,18 @@ func (s *Store) ListPools(ctx context.Context) ([]PoolInfo, error) {
 			address pgtype.Text
 			epoch   pgtype.Int8
 			expires pgtype.Timestamptz
+			target  pgtype.Int8
+			age     pgtype.Float8
 		)
-		err := r.Scan(&p.Name, &p.Paused, &holder, &address, &epoch, &expires, &p.Workers, &p.Slots, &p.ReadyJobs, &p.RunningJobs)
+		err := r.Scan(&p.Name, &p.Paused, &holder, &address, &epoch, &expires, &p.Workers, &p.Slots, &p.ReadyJobs, &p.RunningJobs,
+			&target, &age)
 		if holder.Valid {
 			p.Owner = &Lease{Name: PoolLeaseName(p.Name), Holder: holder.String, Address: address.String, Epoch: epoch.Int64, ExpiresAt: expires.Time}
+		}
+		p.BacklogTarget = msDuration(target)
+		if age.Valid {
+			d := time.Duration(age.Float64 * float64(time.Second))
+			p.BacklogAge = &d
 		}
 		return p, err
 	})

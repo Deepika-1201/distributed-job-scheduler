@@ -13,10 +13,15 @@ Implements the [HLD](architecture.md). This document grows phase by phase, and e
 | [7. Priority selection](#7-priority-selection) | 2 | Written |
 | [8. Persistence](#8-persistence) | 3 | Written |
 | [9. Job API](#9-job-api) | 4 | Written |
-| Scheduler internals | 6 | Planned |
-| Leases and fencing | 7 | Planned |
-| Worker protocol and dispatcher internals | 8 | Planned |
-| Recovery: reaper, timeouts, re-drive | 9 | Planned |
+| [10. Scheduler](#10-scheduler) | 6 | Written |
+| [11. Coordination](#11-coordination) | 7 | Written |
+| [12. Worker system](#12-worker-system) | 8 | Written |
+| [13. Recovery and maintenance](#13-recovery-and-maintenance) | 9 | Written |
+| [14. Platform administration](#14-platform-administration) | 12 | Written |
+| [15. Quotas and load shedding](#15-quotas-and-load-shedding) | 12 | Written |
+| [16. Payload schemas and listing details](#16-payload-schemas-and-listing-details) | 12 | Written |
+| [17. Observability](#17-observability) | 11 | Written |
+| [18. Pool backlog](#18-pool-backlog) | 11 | Written |
 | Events and outbox | Later | Planned |
 
 The [HLD's open questions](architecture.md#appendix-c--open-questions-for-the-lld) are resolved in the phase that needs them: 1–5 in phase 3 (§8.1), 6 and 12 in phase 4, 7–9 in phase 8, 10 and 11 in phase 6, 13 in phase 10, 14 in phase 4.
@@ -112,6 +117,7 @@ If a component fails, shutdown starts immediately at step 2, skipping the delay.
 | `JS_OTLP_ENDPOINT` | empty | `host:port` of an OTLP/gRPC collector; empty turns trace export off (§17.1) |
 | `JS_OTLP_INSECURE` | `false` | Plaintext to the collector, for local stacks |
 | `JS_TRACE_SAMPLE_RATIO` | `1` | Share of root traces sampled, 0–1; child spans follow their parent |
+| `JS_BACKLOG_TARGET` | `5m` | Backlog target of pools without their own, 10 s–24 h (§18); `JS_SHED_LOW_AFTER` and `JS_SHED_NORMAL_AFTER` are rejected |
 | `JS_SHUTDOWN_DELAY` | `0s` | Time to keep serving after a signal while readiness fails; set to about 5 s behind a load balancer |
 | `JS_SHUTDOWN_TIMEOUT` | `30s` | Maximum time for each component to stop |
 
@@ -769,6 +775,7 @@ Implements FR-10 (trigger) and FR-21 ([ADR-017](decisions/ADR-017-platform-admin
 | `DELETE /v1/workers/{id}` | platform-admin | Closes the session; its held attempts become `LOST` and are retried |
 | `GET /v1/pools` | platform-admin | Every pool known from job types, sessions or `pools`, with its state (see below) |
 | `POST /v1/pools/{name}/pause`, `/resume` | platform-admin | Sets `pools.paused`; idempotent |
+| `PUT /v1/pools/{name}/settings` | platform-admin | Sets the pool's backlog target (§18.5) |
 | `POST /v1/job-types/{name}/pause`, `/resume` | operator | Sets `job_types.paused` for the caller's tenant; idempotent |
 | `POST /v1/schedules/{id}/trigger` | operator | `201` with the created job |
 
@@ -777,12 +784,13 @@ Implements FR-10 (trigger) and FR-21 ([ADR-017](decisions/ADR-017-platform-admin
 - whether it is paused;
 - its owner, from the pool lease: node, address and epoch;
 - its active workers and their total slots;
-- its `READY` and `RUNNING` job counts.
+- its `READY` and `RUNNING` job counts;
+- its effective backlog target, and its backlog age from the owner's latest sample (§18).
 
 **Access and audit:**
 
 - Only a platform-admin can create a `platform-admin` key. Other callers get `403`.
-- Every mutation above writes an audit row: `pool.pause`, `pool.resume`, `worker.drain`, `worker.deregister`, `job_type.pause`, `job_type.resume` and `schedule.trigger`.
+- Every mutation above writes an audit row: `pool.pause`, `pool.resume`, `pool.settings`, `worker.drain`, `worker.deregister`, `job_type.pause`, `job_type.resume` and `schedule.trigger`.
 
 ### 14.3 Behavior
 
@@ -835,18 +843,18 @@ Order on `POST /v1/jobs`:
 2. The tenant's rate limit.
 3. Payload size (`413`).
 4. Validation (`422`).
-5. Shedding by priority and pool (`503`).
+5. Shedding by priority, against the pool's backlog target (`503`, §18.4).
 6. The pending-jobs quota (`429`).
 
 **Caching on each `api` node:**
 
 - Quotas are cached per tenant for 30 s.
 - The pending count is `SELECT count(*) FROM (SELECT 1 FROM jobs WHERE tenant_id = $1 LIMIT max_pending)`, cached for 5 s.
-- The backlog sample is refreshed at most every 2 s, by whichever request finds it stale.
+- The pools' owner-recorded backlogs are read at most every 2 s, by whichever request finds its copy stale.
 
 ### 15.4 Tests
 
-- **Store:** quotas round-trip; the pending count is bounded; the schedule quota is enforced; running caps are per pool; backlog ages.
+- **Store:** quotas round-trip; the pending count is bounded; the schedule quota is enforced; running caps are per pool. Backlog tests are in §18.6.
 - **API:**
   - per-tenant rate limit, payload limit, pending quota and schedule quota;
   - shedding rejects `LOW` then `NORMAL` but never `HIGH`;
@@ -891,8 +899,8 @@ Implements FR-23 and HLD §17 ([ADR-020](decisions/ADR-020-telemetry.md)).
 | `dispatch_latency_seconds` | Dispatcher, `attempt_started_at − ready_at` of each job delivered to a poll |
 | `attempts_total`, `execution_duration_seconds`, `jobs_retried_total`, `jobs_dead_lettered_total` | `CompleteAttempt`: worker reports, the reaper and deregistration all pass through it |
 | `jobs_completed_total` | Every move to history: completion, cancel, expire, skip, supersede, bulk cancel |
-| `jobs_ready`, `jobs_oldest_ready_age_seconds`, `jobs_running`, `worker_slots` | The pool's owner, sampled every 10 s |
-| `pools_unowned` | Every engine node: pools with active sessions but no unexpired lease (for the "no pool owner" alert) |
+| `jobs_ready`, `jobs_held`, `jobs_oldest_ready_age_seconds`, `pool_backlog_target_seconds`, `jobs_running`, `worker_slots` | The pool's owner, sampled every 10 s. `jobs_ready` and the age cover dispatchable work only (§18.2) |
+| `pools_unowned` | Every engine node: pools with active sessions or `READY` jobs but no unexpired lease (for the "no pool owner" alert) |
 | `worker_sessions_expired_total` | Reaper |
 | `stale_completions_rejected_total`, `pool_owner_changes_total` | Dispatcher |
 | `db_transaction_duration_seconds{operation}` | `Store.inTx`, labeled with the calling exported method |
@@ -929,8 +937,8 @@ The API access log includes `trace_id` and `span_id` whenever the request has a 
 ### 17.4 Alerts and local stack
 
 - **Alert rules:** `deploy/prometheus/alerts.yml` implements HLD §17.5 for the signals exported here.
-  - The backlog-age threshold is a single 5-minute default until pools have agreed targets.
-  - `DispatchStalled` also fires for a paused pool, or when the free workers can't run the waiting job types.
+  - `BacklogAge` compares each pool's backlog age with its own `pool_backlog_target_seconds` (§18).
+  - Held work doesn't count, so paused pools and capped tenants don't trigger `BacklogAge` or `DispatchStalled`. `DispatchStalled` still fires when the free workers can't run the waiting job types.
   - Infrastructure alerts belong to the deployment phase: database CPU, failover and dead tuples.
   - CI validates the Prometheus configuration and runs the rule unit tests (`alerts_test.yml`) with `promtool`.
 - **`docker compose`:**
@@ -950,3 +958,56 @@ The API access log includes `trace_id` and `span_id` whenever the request has a 
   - the API stores its server span as the job's `trace_parent`, and logs the caller's trace ID.
 - **Configuration:** OTLP and sampling variables are parsed and validated.
 - **Smoke test:** with the collector unreachable, the binary serves `/metrics` and exits within the flush timeout.
+
+## 18. Pool backlog
+
+Implements [ADR-021](decisions/ADR-021-pool-backlog.md): one definition of a pool's backlog for shedding, alerts and autoscaling.
+
+### 18.1 Schema (phase 11 migration)
+
+`pools` gains:
+
+- `backlog_target_ms`, between 10 s and 24 h; `NULL` means `JS_BACKLOG_TARGET`;
+- `oldest_due_at` and `sampled_at`, written by the owner.
+
+### 18.2 The owner's sample
+
+Every 10 s, the pool owner:
+
+1. **Reads one read-only snapshot** (repeatable read), so a job just claimed can't count as both `READY` and `RUNNING`:
+   - `READY` jobs not past their start deadline, grouped by priority and by hold. A job is held for `pool_paused`, `job_type_paused` (the claim's `notHeldSQL`) or `tenant_cap` (the tenants the dispatcher skips for their cap), in that order; otherwise it is dispatchable;
+   - `RUNNING` jobs per tenant, the active sessions' slots, and the pool's target.
+2. **Publishes the gauges.** `jobs_oldest_ready_age_seconds` is `now() − min(run_at)` over dispatchable jobs.
+3. **Records the backlog** on the pool row: `oldest_due_at` (the oldest dispatchable `run_at`, or `NULL`) and `sampled_at`. The upsert runs only while the owner's lease name, holder and epoch still match.
+
+### 18.3 Ownership
+
+- Engines want a pool that has an active session, or that is named by a job type or a `pools` row and has a `READY` job (one index probe per pool).
+- As before, a pool no longer wanted is dropped after two session TTLs.
+- A pool without workers is owned and sampled; its dispatch loop idles because nothing polls it.
+
+### 18.4 Admission
+
+- `api` nodes read the `pools` rows sampled within the last minute, at most every 2 s.
+- A pool's backlog age is `now() − oldest_due_at`, or zero when that is `NULL`. Its target is the row's, or `JS_BACKLOG_TARGET`.
+- `LOW` is shed when the age exceeds the target; `NORMAL` when it exceeds three times the target.
+- A pool without a fresh row doesn't shed. Database saturation still sheds `LOW` (ADR-018).
+
+### 18.5 Settings
+
+- `PUT /v1/pools/{name}/settings` with `{"backlog_target": "15m"}`. `null` or an absent field resets to the default.
+- The target is validated to 10 s–24 h, and the change is audited as `pool.settings`.
+- The response is the pool, as in `GET /v1/pools`, which adds `backlog_target` (effective) and `backlog_age` (from a fresh sample, else `null`).
+
+### 18.6 Tests
+
+- **Store:**
+  - held work is split by reason and left out of the oldest age;
+  - a paused pool holds everything;
+  - the fenced write ignores a deposed owner, and stale samples are ignored;
+  - wanted and unowned pools follow sessions and `READY` jobs;
+  - settings round-trip and are audited.
+- **API:** shedding needs a fresh sample; it follows the pool's target (`LOW` past 1×, `NORMAL` past 3×) and ignores capped tenants and paused pools. Settings are validated and need platform-admin.
+- **End to end:** the owner reports the target and held gauges, and records the backlog for admission.
+- **Alerts:** a `promtool` test judges backlog age against each pool's own target.
+- **Configuration:** `JS_BACKLOG_TARGET` is validated, and the removed shedding variables fail startup.

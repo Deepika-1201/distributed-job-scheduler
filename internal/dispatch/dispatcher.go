@@ -41,6 +41,7 @@ type Config struct {
 	RoundInterval     time.Duration // default 100 ms, while workers wait
 	MaxPollWait       time.Duration // default 30 s
 	MetricsInterval   time.Duration // how often gauges are sampled, default 10 s
+	BacklogTarget     time.Duration // pools without their own target, default 5 min (ADR-021)
 	Weights           domain.PriorityWeights
 }
 
@@ -59,6 +60,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.MetricsInterval == 0 {
 		c.MetricsInterval = 10 * time.Second
+	}
+	if c.BacklogTarget == 0 {
+		c.BacklogTarget = 5 * time.Minute
 	}
 	if c.Weights == nil {
 		c.Weights = domain.DefaultPriorityWeights()
@@ -344,13 +348,13 @@ func (d *Dispatcher) wantedPools() []string {
 	return names
 }
 
-// refreshWanted tracks the pools with live sessions on any node, so every node competes for
-// every pool's lease and a surviving node takes over when an owner dies.
+// refreshWanted tracks the pools with live sessions or READY jobs on any node, so every node
+// competes for them and a surviving node takes over when an owner dies.
 func (d *Dispatcher) refreshWanted(ctx context.Context) {
 	ticker := time.NewTicker(wantedRefresh)
 	defer ticker.Stop()
 	for {
-		if pools, err := d.store.ActivePools(ctx); err == nil {
+		if pools, err := d.store.WantedPools(ctx); err == nil {
 			now := time.Now()
 			d.mu.Lock()
 			for _, p := range pools {

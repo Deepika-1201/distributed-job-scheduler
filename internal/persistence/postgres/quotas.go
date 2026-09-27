@@ -101,31 +101,6 @@ func (s *Store) CountPending(ctx context.Context, tenantID domain.TenantID, limi
 	return n, err
 }
 
-// BacklogAges returns, for each unpaused pool with READY jobs, how long its oldest has been due.
-func (s *Store) BacklogAges(ctx context.Context) (map[string]time.Duration, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT p.pool, extract(epoch FROM now() - min(o.run_at))
-		FROM (SELECT DISTINCT pool FROM job_types) AS p
-		CROSS JOIN unnest('{1,2,3,4}'::smallint[]) AS pr
-		CROSS JOIN LATERAL (SELECT run_at FROM jobs
-		    WHERE state = 'READY' AND pool = p.pool AND priority = pr ORDER BY run_at LIMIT 1) AS o
-		WHERE NOT EXISTS (SELECT 1 FROM pools WHERE name = p.pool AND paused)
-		GROUP BY p.pool`)
-	if err != nil {
-		return nil, err
-	}
-	ages := map[string]time.Duration{}
-	var (
-		pool    string
-		seconds float64
-	)
-	_, err = pgx.ForEachRow(rows, []any{&pool, &seconds}, func() error {
-		ages[pool] = time.Duration(seconds * float64(time.Second))
-		return nil
-	})
-	return ages, err
-}
-
 // Saturated reports whether every database connection is in use and callers have waited
 // for one since the last call; it drives load shedding (ADR-018).
 func (s *Store) Saturated() bool {

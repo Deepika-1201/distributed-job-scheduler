@@ -127,8 +127,7 @@ func serve() error {
 			TenantRateLimit:     cfg.API.NodeRateLimit(),
 			Replicas:            cfg.API.Replicas,
 			MinScheduleInterval: cfg.API.MinScheduleInterval,
-			ShedLowAfter:        cfg.API.ShedLowAfter,
-			ShedNormalAfter:     cfg.API.ShedNormalAfter,
+			BacklogTarget:       cfg.BacklogTarget,
 			Addr:                cfg.HTTPAddr,
 		})
 		components = append(components, httpserver.New("api", cfg.HTTPAddr, apiServer.Handler(), cfg.ShutdownTimeout, log))
@@ -143,7 +142,7 @@ func serve() error {
 			advertise = lis.Addr().String()
 		}
 		dispatcher, err := dispatch.New(store, dispatch.Config{NodeID: cfg.Engine.NodeID, AdvertiseAddr: advertise,
-			Token: cfg.Engine.WorkerToken, Listener: lis}, log)
+			Token: cfg.Engine.WorkerToken, Listener: lis, BacklogTarget: cfg.BacklogTarget}, log)
 		if err != nil {
 			return err
 		}

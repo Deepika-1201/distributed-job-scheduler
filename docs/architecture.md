@@ -659,7 +659,7 @@ sequenceDiagram
 
 ### 12.6 Autoscaling signals
 
-Each pool exports its `READY` count, the age of its oldest `READY` job, and slot utilization. Workers scale out when the oldest `READY` age exceeds its target or utilization passes about 80%, and scale in (with drain) when utilization stays low.
+Each pool exports its `READY` count, the age of its oldest `READY` job, and slot utilization. Workers scale out when the oldest `READY` age exceeds the pool's backlog target ([ADR-021](decisions/ADR-021-pool-backlog.md)) or utilization passes about 80%, and scale in (with drain) when utilization stays low. Held work (paused, or over a tenant's cap) doesn't count.
 
 ### 12.7 Long-running jobs
 
@@ -961,7 +961,7 @@ Each scenario lists detection, recovery, consistency, duplicate execution, corru
 | 1. Request limits | Body size, payload ≤ 64 KB, schema validation | `413` / `422` |
 | 2. Tenant rate limit | Token bucket on each `api` node (tenant limit ÷ replica count) | `429` + `Retry-After` |
 | 3. Tenant quotas | Pending jobs, active schedules, minimum schedule interval | `429` / `422` |
-| 4. Global overload shedding | When backlog age or database saturation crosses thresholds, reject new `LOW`, then `NORMAL` submissions | `503` + `Retry-After` |
+| 4. Global overload shedding | When a pool's backlog passes its target ([ADR-021](decisions/ADR-021-pool-backlog.md)) or the database saturates, reject new `LOW`, then `NORMAL` submissions | `503` + `Retry-After` |
 | 5. Durable buffering | Accepted jobs wait in the database | n/a |
 | 6. Dispatch flow control | Claim only as many jobs as there are free worker slots | n/a |
 | 7. Capacity | Worker pools autoscale on backlog; `api` autoscales on CPU | n/a |
@@ -1115,8 +1115,10 @@ Job types, schedules and jobs belong to a tenant. Pools are platform resources o
 | `jobs_submitted_total` | Counter | tenant, type, priority | Demand |
 | `jobs_scheduled_total` | Counter | tenant, type, source (delayed / schedule) | Future work created |
 | `jobs_rejected_total` | Counter | tenant, reason | Admission control |
-| `jobs_ready` | Gauge | pool, priority | Queue depth |
+| `jobs_ready` | Gauge | pool, priority | Queue depth: dispatchable work |
+| `jobs_held` | Gauge | pool, reason | `READY` work held by a pause or a tenant cap |
 | `jobs_oldest_ready_age_seconds` | Gauge | pool | Backlog age; the main autoscaling and alerting signal |
+| `pool_backlog_target_seconds` | Gauge | pool | The age that backlog is judged against |
 | `jobs_running` | Gauge | pool, tenant | Concurrency |
 | `jobs_completed_total` | Counter | type, state | Succeeded, failed, dead-lettered, cancelled, expired, skipped |
 | `scheduling_lag_seconds` | Histogram | pool | `ready_at − run_at` (NFR-3) |
@@ -1375,6 +1377,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-018](decisions/ADR-018-quotas-and-load-shedding.md) | Tenant quotas and priority-aware load shedding | Accepted |
 | [ADR-019](decisions/ADR-019-payload-json-schema.md) | Payload validation with JSON Schema | Accepted |
 | [ADR-020](decisions/ADR-020-telemetry.md) | Telemetry: pulled metrics, linked attempt traces, owner-reported pool gauges | Accepted |
+| [ADR-021](decisions/ADR-021-pool-backlog.md) | Pool backlog: dispatchable work, measured by the owner, against per-pool targets | Accepted |
 
 ## Appendix C — Open questions for the LLD
 

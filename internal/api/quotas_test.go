@@ -1,12 +1,14 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"jobscheduler/internal/domain"
+	"jobscheduler/internal/persistence/postgres"
 )
 
 // noCache makes quota, pending and backlog changes visible to the next request.
@@ -102,6 +104,27 @@ func TestPerTenantRateLimit(t *testing.T) {
 	e.call("GET", "/v1/tenants", root, "").want(http.StatusOK) // other tenants keep the default rate
 }
 
+// sampleBacklog records the default pool's backlog as its owner would (ADR-021); capped lists
+// the tenants at their running cap.
+func (e *env) sampleBacklog(capped ...domain.TenantID) {
+	e.t.Helper()
+	name := postgres.PoolLeaseName("default")
+	l, err := e.store.GetLease(ctx, name)
+	if errors.Is(err, domain.ErrNotFound) {
+		l, _, err = e.store.AcquireLease(ctx, name, "test-owner", "", time.Hour)
+	}
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	g, err := e.store.SamplePoolGauges(ctx, "default", capped)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if err := e.store.RecordPoolBacklog(ctx, l, "default", g.OldestDue); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
 func TestOverloadedPoolShedsLowThenNormal(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, 1000)
@@ -112,26 +135,46 @@ func TestOverloadedPoolShedsLowThenNormal(t *testing.T) {
 			id, age.Seconds()); err != nil {
 			t.Fatal(err)
 		}
+		e.sampleBacklog()
 	}
 	operator := e.key(e.tenant, domain.RoleOperator)
 	submit := func(priority string) response {
 		return e.call("POST", "/v1/jobs", operator, `{"type": "email.send", "priority": "`+priority+`"}`)
 	}
+	if _, err := e.pool.Exec(ctx, `UPDATE jobs SET run_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	submit("LOW").want(http.StatusCreated) // no owner has sampled the pool: its backlog is unknown
 
-	backlog(10 * time.Minute) // past the LOW threshold (5 m)
+	backlog(10 * time.Minute) // past the default target (5 m)
 	r := submit("LOW").wantError(http.StatusServiceUnavailable, "overloaded")
 	if r.header.Get("Retry-After") != "30" {
 		t.Errorf("Retry-After = %q, want 30", r.header.Get("Retry-After"))
 	}
 	submit("NORMAL").want(http.StatusCreated)
 
-	backlog(20 * time.Minute) // past the NORMAL threshold (15 m)
+	backlog(20 * time.Minute) // past three times the target
 	submit("NORMAL").wantError(http.StatusServiceUnavailable, "overloaded")
 	submit("HIGH").want(http.StatusCreated)
 	submit("CRITICAL").want(http.StatusCreated)
 
 	platform, _ := e.newTenant("platform")
 	root := e.key(platform, domain.RolePlatformAdmin)
+	e.call("PUT", "/v1/pools/default/settings", root, `{"backlog_target": "30m"}`).want(http.StatusOK)
+	submit("LOW").want(http.StatusCreated) // 20 m is within the pool's own target
+	e.call("PUT", "/v1/pools/default/settings", root, `{}`).want(http.StatusOK)
+	submit("LOW").wantError(http.StatusServiceUnavailable, "overloaded")
+
+	e.sampleBacklog(e.tenant)
+	submit("LOW").want(http.StatusCreated) // a tenant at its running cap sheds nobody
+	e.sampleBacklog()
 	e.call("POST", "/v1/pools/default/pause", root, "").want(http.StatusOK)
+	e.sampleBacklog()
 	submit("LOW").want(http.StatusCreated) // a paused pool's backlog is expected, not overload
+
+	if _, err := e.pool.Exec(ctx, `UPDATE pools SET sampled_at = now() - interval '2 minutes'`); err != nil {
+		t.Fatal(err)
+	}
+	e.call("POST", "/v1/pools/default/resume", root, "").want(http.StatusOK)
+	submit("LOW").want(http.StatusCreated) // a stale sample is ignored
 }

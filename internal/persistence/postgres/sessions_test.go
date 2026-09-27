@@ -40,8 +40,8 @@ func TestSessionLifecycle(t *testing.T) {
 	if ws.State != domain.SessionActive || !slices.Equal(ws.JobTypes, []string{"email.send"}) || ws.Labels["zone"] != "a" {
 		t.Fatalf("session = %+v", ws)
 	}
-	if pools, err := f.store.ActivePools(ctx); err != nil || !slices.Equal(pools, []string{"default"}) {
-		t.Errorf("ActivePools = %v, %v", pools, err)
+	if pools, err := f.store.WantedPools(ctx); err != nil || !slices.Equal(pools, []string{"default"}) {
+		t.Errorf("WantedPools = %v, %v", pools, err)
 	}
 	if _, err := f.store.Heartbeat(ctx, ws.ID, nil, 30*time.Second); err != nil {
 		t.Errorf("Heartbeat: %v", err)
@@ -55,7 +55,7 @@ func TestSessionLifecycle(t *testing.T) {
 	if _, err := f.store.GetActiveSession(ctx, ws.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("GetActiveSession after close = %v", err)
 	}
-	if pools, _ := f.store.ActivePools(ctx); len(pools) != 0 {
+	if pools, _ := f.store.WantedPools(ctx); len(pools) != 0 {
 		t.Errorf("pools after close = %v", pools)
 	}
 }

@@ -1,6 +1,6 @@
 # ADR-020: Telemetry: pulled metrics, linked attempt traces, owner-reported pool gauges
 
-- **Status:** Accepted. Amends the telemetry row of [ADR-012](ADR-012-language-and-core-libraries.md) for metrics.
+- **Status:** Accepted. Amends the telemetry row of [ADR-012](ADR-012-language-and-core-libraries.md) for metrics. Amended by [ADR-021](ADR-021-pool-backlog.md) (pool gauges).
 - **Date:** 2026-09-27
 - **Related:** [ADR-006](ADR-006-leader-election.md), [ADR-014](ADR-014-worker-protocol.md), [HLD §17](../architecture.md#17-observability), [LLD §17](../low-level-design.md#17-observability)
 
@@ -61,7 +61,7 @@
 - **Traces:** OTLP over gRPC to the collector.
   - Enabled by `JS_OTLP_ENDPOINT`; without it the global provider stays a no-op, at zero cost.
   - Sampling is parent-based on a `JS_TRACE_SAMPLE_RATIO` root ratio (default 1), leaving error and latency retention to tail sampling in the collector.
-- **Pool gauges:** reported by the pool's owner. These are `jobs_ready`, `jobs_oldest_ready_age_seconds`, `jobs_running` and `worker_slots`.
+- **Pool gauges:** reported by the pool's owner. These are `jobs_ready`, `jobs_oldest_ready_age_seconds`, `jobs_running` and `worker_slots`. *Amended by [ADR-021](ADR-021-pool-backlog.md): `jobs_ready` and the age count dispatchable work only; `jobs_held` and `pool_backlog_target_seconds` are added.*
   - The owner refreshes them every 10 s in the background, so a scrape never waits on the database.
   - Alerts use `max by (pool)`, which is safe during a handoff overlap.
 - **Across the queue:**

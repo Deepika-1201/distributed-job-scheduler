@@ -31,7 +31,16 @@ func onCommit(tx pgx.Tx, fn func()) {
 
 // inTx runs fn in a transaction, timed as db_transaction_duration_seconds and traced when
 // ctx already carries a span (LLD §17).
-func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) (err error) {
+func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
+	return s.inTxWith(ctx, pgx.TxOptions{}, fn)
+}
+
+// inSnapshot runs fn in a read-only transaction that sees a single snapshot of the database.
+func (s *Store) inSnapshot(ctx context.Context, fn func(pgx.Tx) error) error {
+	return s.inTxWith(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, fn)
+}
+
+func (s *Store) inTxWith(ctx context.Context, opts pgx.TxOptions, fn func(pgx.Tx) error) (err error) {
 	op := txOperation()
 	start := time.Now()
 	if trace.SpanContextFromContext(ctx).IsValid() {
@@ -46,7 +55,7 @@ func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) (err error) {
 		}()
 	}
 	var opened pgx.Tx
-	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err = pgx.BeginTxFunc(ctx, s.pool, opts, func(tx pgx.Tx) error {
 		opened = tx
 		return fn(tx)
 	})
@@ -66,7 +75,7 @@ func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) (err error) {
 // keeps the label set bounded and meaningful.
 func txOperation() string {
 	pcs := make([]uintptr, 8)
-	frames := runtime.CallersFrames(pcs[:runtime.Callers(3, pcs)]) // skip Callers, txOperation, inTx
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(3, pcs)]) // skip Callers, txOperation, inTxWith
 	for {
 		f, more := frames.Next()
 		if _, method, ok := strings.Cut(f.Function, ".(*Store)."); ok {
@@ -159,73 +168,6 @@ func recordAttempt(job domain.Job, outcome domain.AttemptState, d domain.Decisio
 	case domain.StateDeadLettered:
 		observability.JobsDeadLettered.Add(ctx, 1, reason)
 	}
-}
-
-// PoolGauges is a sample of one pool's queue and capacity, reported by its owner.
-type PoolGauges struct {
-	Ready       map[domain.Priority]int
-	OldestReady time.Duration // age of the oldest READY job; zero when none
-	Running     map[domain.TenantID]int
-	SlotsBusy   int
-	SlotsFree   int
-}
-
-// SamplePoolGauges reads the pool's READY backlog, running jobs and worker slots.
-func (s *Store) SamplePoolGauges(ctx context.Context, pool string) (PoolGauges, error) {
-	g := PoolGauges{Ready: map[domain.Priority]int{}, Running: map[domain.TenantID]int{}}
-	var (
-		priority int16
-		n        int
-		oldest   float64
-	)
-	rows, err := s.pool.Query(ctx, `
-		SELECT priority, count(*), extract(epoch FROM now() - min(ready_at))::float8
-		FROM jobs WHERE pool = $1 AND state = 'READY' GROUP BY priority`, pool)
-	if err != nil {
-		return PoolGauges{}, err
-	}
-	if _, err := pgx.ForEachRow(rows, []any{&priority, &n, &oldest}, func() error {
-		g.Ready[domain.Priority(priority)] = n
-		g.OldestReady = max(g.OldestReady, time.Duration(oldest*float64(time.Second)))
-		return nil
-	}); err != nil {
-		return PoolGauges{}, err
-	}
-
-	var tenant string
-	rows, err = s.pool.Query(ctx, `
-		SELECT tenant_id::text, count(*) FROM jobs WHERE pool = $1 AND state = 'RUNNING' GROUP BY tenant_id`, pool)
-	if err != nil {
-		return PoolGauges{}, err
-	}
-	running := 0
-	if _, err := pgx.ForEachRow(rows, []any{&tenant, &n}, func() error {
-		g.Running[domain.TenantID(tenant)] = n
-		running += n
-		return nil
-	}); err != nil {
-		return PoolGauges{}, err
-	}
-
-	var slots int
-	if err := s.pool.QueryRow(ctx, `
-		SELECT COALESCE(sum(slots), 0) FROM worker_sessions WHERE pool = $1 AND state = 'ACTIVE'`,
-		pool).Scan(&slots); err != nil {
-		return PoolGauges{}, err
-	}
-	g.SlotsBusy = min(running, slots)
-	g.SlotsFree = slots - g.SlotsBusy
-	return g, nil
-}
-
-// UnownedPools counts pools with active worker sessions but no unexpired lease.
-func (s *Store) UnownedPools(ctx context.Context) (int, error) {
-	var n int
-	err := s.pool.QueryRow(ctx, `
-		SELECT count(DISTINCT s.pool) FROM worker_sessions s
-		WHERE s.state = 'ACTIVE' AND NOT EXISTS (
-		    SELECT 1 FROM leases l WHERE l.name = 'pool:' || s.pool AND l.expires_at > now())`).Scan(&n)
-	return n, err
 }
 
 // ClockOffset estimates the database clock minus this node's clock from one round trip.

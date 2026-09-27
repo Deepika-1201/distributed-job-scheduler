@@ -68,19 +68,26 @@ type poolOwner struct {
 }
 
 type poolResponse struct {
-	Name        string     `json:"name"`
-	Paused      bool       `json:"paused"`
-	Owner       *poolOwner `json:"owner"`
-	Workers     int        `json:"workers"`
-	Slots       int        `json:"slots"`
-	ReadyJobs   int        `json:"ready_jobs"`
-	RunningJobs int        `json:"running_jobs"`
+	Name          string     `json:"name"`
+	Paused        bool       `json:"paused"`
+	Owner         *poolOwner `json:"owner"`
+	Workers       int        `json:"workers"`
+	Slots         int        `json:"slots"`
+	ReadyJobs     int        `json:"ready_jobs"`
+	RunningJobs   int        `json:"running_jobs"`
+	BacklogTarget string     `json:"backlog_target"`
+	BacklogAge    *string    `json:"backlog_age"`
 }
 
-func toPoolResponse(p postgres.PoolInfo) poolResponse {
-	resp := poolResponse{Name: p.Name, Paused: p.Paused, Workers: p.Workers, Slots: p.Slots, ReadyJobs: p.ReadyJobs, RunningJobs: p.RunningJobs}
+func (s *Server) toPoolResponse(p postgres.PoolInfo) poolResponse {
+	resp := poolResponse{Name: p.Name, Paused: p.Paused, Workers: p.Workers, Slots: p.Slots, ReadyJobs: p.ReadyJobs,
+		RunningJobs: p.RunningJobs, BacklogTarget: s.admission.target(postgres.PoolBacklog{Target: p.BacklogTarget}).String()}
 	if p.Owner != nil {
 		resp.Owner = &poolOwner{NodeID: p.Owner.Holder, Address: p.Owner.Address, Epoch: p.Owner.Epoch, ExpiresAt: p.Owner.ExpiresAt}
+	}
+	if p.BacklogAge != nil {
+		age := p.BacklogAge.Truncate(time.Second).String()
+		resp.BacklogAge = &age
 	}
 	return resp
 }
@@ -92,10 +99,25 @@ func (s *Server) listPools(w http.ResponseWriter, r *http.Request, _ principal) 
 	}
 	resp := listResponse[poolResponse]{Items: make([]poolResponse, 0, len(pools))}
 	for _, p := range pools {
-		resp.Items = append(resp.Items, toPoolResponse(p))
+		resp.Items = append(resp.Items, s.toPoolResponse(p))
 	}
 	writeJSON(w, http.StatusOK, resp)
 	return nil
+}
+
+// writePool responds with the pool's current state.
+func (s *Server) writePool(w http.ResponseWriter, r *http.Request, name string) error {
+	pools, err := s.store.ListPools(r.Context())
+	if err != nil {
+		return err
+	}
+	for _, info := range pools {
+		if info.Name == name {
+			writeJSON(w, http.StatusOK, s.toPoolResponse(info))
+			return nil
+		}
+	}
+	return domain.ErrNotFound
 }
 
 // poolAction pauses or resumes dispatch for a pool (ADR-017).
@@ -108,19 +130,38 @@ func (s *Server) poolAction(paused bool) handlerFunc {
 		if err := s.store.SetPoolPaused(r.Context(), name, paused, p.Tenant, s.audit(r, p)); err != nil {
 			return err
 		}
-		pools, err := s.store.ListPools(r.Context())
-		if err != nil {
-			return err
-		}
-		for _, info := range pools {
-			if info.Name == name {
-				writeJSON(w, http.StatusOK, toPoolResponse(info))
-				return nil
-			}
-		}
-		writeJSON(w, http.StatusOK, poolResponse{Name: name, Paused: paused})
-		return nil
+		return s.writePool(w, r, name)
 	}
+}
+
+// poolSettingsBody is the wire form of a pool's settings; null means the platform default.
+type poolSettingsBody struct {
+	BacklogTarget *string `json:"backlog_target"`
+}
+
+// putPoolSettings replaces a pool's settings (ADR-021).
+func (s *Server) putPoolSettings(w http.ResponseWriter, r *http.Request, p principal) error {
+	name := r.PathValue("name")
+	if !namePattern.MatchString(name) {
+		return fieldErrors{"name": "must match " + namePattern.String()}.err()
+	}
+	var body poolSettingsBody
+	if _, err := readJSON(r, &body); err != nil {
+		return err
+	}
+	var target *time.Duration
+	if b := body.BacklogTarget; b != nil {
+		d, err := time.ParseDuration(*b)
+		if err != nil || d < 10*time.Second || d > 24*time.Hour {
+			return fieldErrors{"backlog_target": "must be a duration between 10s and 24h"}.err()
+		}
+		d = d.Truncate(time.Millisecond)
+		target = &d
+	}
+	if err := s.store.SetPoolSettings(r.Context(), name, target, p.Tenant, s.audit(r, p)); err != nil {
+		return err
+	}
+	return s.writePool(w, r, name)
 }
 
 // jobTypeAction pauses or resumes dispatch of one of the tenant's job types.

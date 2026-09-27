@@ -24,8 +24,10 @@ var (
 	ExecutionDuration = histogram("execution_duration", "s", "Attempt run time (type, outcome)", durationBuckets)
 	DBTransaction     = histogram("db_transaction_duration", "s", "Database transaction time (operation)", dbBuckets)
 
-	JobsReady      = gauge("jobs_ready", "{job}", "READY jobs, reported by the pool owner (pool, priority)")
-	OldestReadyAge = floatGauge("jobs_oldest_ready_age", "s", "Age of the oldest READY job, reported by the pool owner (pool)")
+	JobsReady      = gauge("jobs_ready", "{job}", "Dispatchable READY jobs, reported by the pool owner (pool, priority)")
+	JobsHeld       = gauge("jobs_held", "{job}", "READY jobs held back by a pause or a tenant cap, reported by the pool owner (pool, reason)")
+	OldestReadyAge = floatGauge("jobs_oldest_ready_age", "s", "How long the oldest dispatchable READY job has been due, reported by the pool owner (pool)")
+	BacklogTarget  = floatGauge("pool_backlog_target", "s", "The pool's backlog target, reported by the pool owner (pool)")
 	JobsRunning    = gauge("jobs_running", "{job}", "Running jobs, reported by the pool owner (pool, tenant)")
 	WorkerSlots    = gauge("worker_slots", "{slot}", "Worker slots, reported by the pool owner (pool, state)")
 	PoolsUnowned   = gauge("pools_unowned", "{pool}", "Pools with live workers but no valid lease")

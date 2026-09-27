@@ -9,6 +9,7 @@ import (
 
 	"jobscheduler/internal/domain"
 	"jobscheduler/internal/observability"
+	"jobscheduler/internal/persistence/postgres"
 )
 
 // nodeSample holds the engine-wide gauges this node reports.
@@ -20,8 +21,9 @@ type nodeSample struct {
 // registerGauges reports the latest samples at each collection: the pools this node owns,
 // and the node's own view (ADR-020). A pool's series move with its lease.
 func (d *Dispatcher) registerGauges() (metric.Registration, error) {
-	return observability.Meter().RegisterCallback(d.observe, observability.JobsReady, observability.OldestReadyAge,
-		observability.JobsRunning, observability.WorkerSlots, observability.PoolsUnowned, observability.DBClockOffset)
+	return observability.Meter().RegisterCallback(d.observe, observability.JobsReady, observability.JobsHeld,
+		observability.OldestReadyAge, observability.BacklogTarget, observability.JobsRunning, observability.WorkerSlots,
+		observability.PoolsUnowned, observability.DBClockOffset)
 }
 
 func (d *Dispatcher) observe(_ context.Context, o metric.Observer) error {
@@ -41,7 +43,12 @@ func (d *Dispatcher) observe(_ context.Context, o metric.Observer) error {
 			o.ObserveInt64(observability.JobsReady, int64(g.Ready[pr]),
 				metric.WithAttributes(name, attribute.String("priority", pr.String())))
 		}
-		o.ObserveFloat64(observability.OldestReadyAge, g.OldestReady.Seconds(), metric.WithAttributes(name))
+		for _, reason := range postgres.HeldReasons {
+			o.ObserveInt64(observability.JobsHeld, int64(g.Held[reason]),
+				metric.WithAttributes(name, attribute.String("reason", reason)))
+		}
+		o.ObserveFloat64(observability.OldestReadyAge, g.OldestAge.Seconds(), metric.WithAttributes(name))
+		o.ObserveFloat64(observability.BacklogTarget, d.backlogTarget(g).Seconds(), metric.WithAttributes(name))
 		for tenant, n := range g.Running {
 			o.ObserveInt64(observability.JobsRunning, int64(n),
 				metric.WithAttributes(name, attribute.String("tenant", string(tenant))))
@@ -54,6 +61,14 @@ func (d *Dispatcher) observe(_ context.Context, o metric.Observer) error {
 		o.ObserveFloat64(observability.DBClockOffset, n.clockOffset.Seconds())
 	}
 	return nil
+}
+
+// backlogTarget is the pool's own target, or the platform default.
+func (d *Dispatcher) backlogTarget(g *postgres.PoolGauges) time.Duration {
+	if g.BacklogTarget != nil {
+		return *g.BacklogTarget
+	}
+	return d.cfg.BacklogTarget
 }
 
 // sampleNode refreshes the node's gauges every MetricsInterval until ctx ends.
@@ -84,9 +99,7 @@ func (p *pool) sampleGauges() {
 	ticker := time.NewTicker(p.d.cfg.MetricsInterval)
 	defer ticker.Stop()
 	for {
-		if g, err := p.d.store.SamplePoolGauges(p.ctx, p.name); err == nil {
-			p.gauges.Store(&g)
-		} else {
+		if err := p.sample(); err != nil {
 			p.logError("sampling gauges", err)
 		}
 		select {
@@ -95,6 +108,25 @@ func (p *pool) sampleGauges() {
 		case <-ticker.C:
 		}
 	}
+}
+
+// sample reads the pool's gauges and records its dispatchable backlog, which api nodes shed
+// on (ADR-021).
+func (p *pool) sample() error {
+	cs, err := p.caps(p.ctx)
+	if err != nil {
+		return err
+	}
+	g, err := p.d.store.SamplePoolGauges(p.ctx, p.name, cs.skip)
+	if err != nil {
+		return err
+	}
+	p.gauges.Store(&g)
+	lease, ok := p.d.leases.Lease(p.lease.Name)
+	if !ok {
+		return nil
+	}
+	return p.d.store.RecordPoolBacklog(p.ctx, lease, p.name, g.OldestDue)
 }
 
 // recordDispatch measures READY to attempt start for jobs handed to a worker; both times

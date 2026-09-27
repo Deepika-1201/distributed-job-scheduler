@@ -25,7 +25,29 @@ tests:
           - exp_labels: { pool: stuck, severity: page }
             exp_annotations:
               summary: "Pool stuck has READY jobs and free slots but dispatches nothing"
-              description: "Check the pool owner's logs, pool and job-type holds, and worker job types."
+              description: "Check the pool owner's logs, and the job types the free workers run."
+
+  - name: backlog age is judged against each pool's own target
+    interval: 1m
+    input_series:
+      - series: 'jobs_oldest_ready_age_seconds{pool="web", instance="engine-a"}'
+        values: "400x15"
+      - series: 'pool_backlog_target_seconds{pool="web", instance="engine-a"}'
+        values: "300x15"
+      - series: 'jobs_oldest_ready_age_seconds{pool="batch", instance="engine-b"}'
+        values: "400x15"
+      - series: 'pool_backlog_target_seconds{pool="batch", instance="engine-b"}'
+        values: "3600x15"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BacklogAge
+      - eval_time: 11m
+        alertname: BacklogAge
+        exp_alerts:
+          - exp_labels: { pool: web, severity: page }
+            exp_annotations:
+              summary: "Pool web: oldest dispatchable job has waited 6m 40s, past its target"
+              description: "Workers are not keeping up, or the pool has none. Scale the pool's workers. Held work (jobs_held) doesn't count."
 
   - name: an unowned pool pages after 30 seconds
     interval: 15s
@@ -42,8 +64,8 @@ tests:
         exp_alerts:
           - exp_labels: { severity: page }
             exp_annotations:
-              summary: "1 pool(s) with live workers have no owner"
-              description: "No engine holds the pool lease, so its jobs are not dispatched. Check engine health and lease renewal."
+              summary: "1 pool(s) with workers or READY jobs have no owner"
+              description: "No engine holds the pool lease, so its jobs are not dispatched or measured. Check engine health and lease renewal."
 
   - name: scheduling lag over 1 s at p99 for 10 minutes
     interval: 1m

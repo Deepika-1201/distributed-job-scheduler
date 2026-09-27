@@ -18,20 +18,20 @@ const (
 	shedRetryAfter    = 30 * time.Second
 )
 
-// admission applies tenant quotas and load shedding on this node (ADR-018, LLD §15.3).
+// admission applies tenant quotas and load shedding on this node (ADR-018, ADR-021, LLD §15.3).
 type admission struct {
 	store                            *postgres.Store
 	now                              func() time.Time
 	defaultRate                      float64 // per node
 	replicas                         int
 	defaultMinInterval               time.Duration
-	shedLow, shedNormal              time.Duration
+	backlogTarget                    time.Duration // for pools without their own
 	quotaTTL, pendingTTL, backlogTTL time.Duration
 
 	mu         sync.Mutex
 	quotas     map[domain.TenantID]cached[domain.Quotas]
 	pending    map[domain.TenantID]cached[int]
-	backlog    map[string]time.Duration
+	backlog    map[string]postgres.PoolBacklog
 	saturated  bool
 	sampledAt  time.Time
 	refreshing bool
@@ -115,40 +115,49 @@ func (a *admission) checkPending(ctx context.Context, tenant domain.TenantID, q 
 	return nil
 }
 
-// shed rejects LOW, then NORMAL, submissions to an overloaded pool; HIGH and CRITICAL pass.
+// shed rejects LOW submissions to a pool past its backlog target, and NORMAL ones past three
+// times it; HIGH and CRITICAL pass. A pool without a fresh owner sample never sheds.
 func (a *admission) shed(ctx context.Context, pool string, p domain.Priority) error {
 	if p >= domain.PriorityHigh {
 		return nil
 	}
-	age, saturated := a.sample(ctx, pool)
-	limit := a.shedLow
+	b, sampled, saturated := a.sample(ctx, pool)
+	limit := a.target(b)
 	if p == domain.PriorityNormal {
-		limit = a.shedNormal
+		limit *= 3
 	}
-	if age > limit || (saturated && p == domain.PriorityLow) {
+	if (sampled && b.Age > limit) || (saturated && p == domain.PriorityLow) {
 		return &apiError{status: http.StatusServiceUnavailable, code: "overloaded", retryAfter: shedRetryAfter,
 			message: fmt.Sprintf("the platform is shedding %s submissions for pool %s; retry later or raise the priority", p, pool)}
 	}
 	return nil
 }
 
-// sample returns the pool's backlog age and whether the database is saturated. One request
-// refreshes a stale sample while the others use the previous one.
-func (a *admission) sample(ctx context.Context, pool string) (time.Duration, bool) {
+func (a *admission) target(b postgres.PoolBacklog) time.Duration {
+	if b.Target != nil {
+		return *b.Target
+	}
+	return a.backlogTarget
+}
+
+// sample returns the pool's backlog, whether its owner sampled it recently, and whether the
+// database is saturated. One request refreshes a stale copy while the others use the previous one.
+func (a *admission) sample(ctx context.Context, pool string) (postgres.PoolBacklog, bool, bool) {
 	a.mu.Lock()
 	stale := !a.now().Before(a.sampledAt.Add(a.backlogTTL))
 	if stale && !a.refreshing {
 		a.refreshing = true
 		a.mu.Unlock()
-		ages, err := a.store.BacklogAges(ctx)
+		backlogs, err := a.store.PoolBacklogs(ctx)
 		saturated := a.store.Saturated()
 		a.mu.Lock()
 		a.refreshing = false
 		if err == nil {
-			a.backlog, a.sampledAt = ages, a.now()
+			a.backlog, a.sampledAt = backlogs, a.now()
 		}
 		a.saturated = saturated
 	}
 	defer a.mu.Unlock()
-	return a.backlog[pool], a.saturated
+	b, ok := a.backlog[pool]
+	return b, ok, a.saturated
 }

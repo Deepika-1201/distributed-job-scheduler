@@ -189,6 +189,12 @@ paths:
   /v1/pools/{name}/resume:
     parameters: [{ $ref: "#/components/parameters/PoolName" }]
     post: { summary: Resume dispatch for a pool (platform-admin), responses: { "200": { $ref: "#/components/responses/Pool" } } }
+  /v1/pools/{name}/settings:
+    parameters: [{ $ref: "#/components/parameters/PoolName" }]
+    put:
+      summary: Replace a pool's settings (platform-admin); null means the platform default
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PoolSettings" } } } }
+      responses: { "200": { $ref: "#/components/responses/Pool" } }
 
   /v1/quotas:
     get:
@@ -484,6 +490,19 @@ components:
         slots: { type: integer }
         ready_jobs: { type: integer }
         running_jobs: { type: integer }
+        backlog_target:
+          $ref: "#/components/schemas/Duration"
+          description: The effective target; LOW submissions are shed past it and NORMAL past three times it
+        backlog_age:
+          type: [string, "null"]
+          description: How long the oldest dispatchable job has been due, from the owner's sample; null when there is no recent sample
+    PoolSettings:
+      type: object
+      properties:
+        backlog_target:
+          type: [string, "null"]
+          description: Go duration between 10s and 24h; null or absent means the platform default (JS_BACKLOG_TARGET)
+          examples: ["15m"]
     PoolList:
       type: object
       properties: { items: { type: array, items: { $ref: "#/components/schemas/Pool" } } }

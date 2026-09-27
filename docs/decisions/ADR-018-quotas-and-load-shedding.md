@@ -1,6 +1,6 @@
 # ADR-018: Tenant quotas and priority-aware load shedding
 
-- **Status:** Accepted
+- **Status:** Accepted. Amended by [ADR-021](ADR-021-pool-backlog.md): shedding thresholds follow each pool's backlog target, and held work doesn't count.
 - **Date:** 2026-09-27
 - **Related:** [ADR-011](ADR-011-caching-and-redis.md), [ADR-017](ADR-017-platform-administration.md), [HLD §15.2](../architecture.md#152-backpressure-and-admission-control), [LLD §15](../low-level-design.md#15-quotas-and-load-shedding)
 
@@ -63,7 +63,7 @@
 | Minimum interval | Schedule validation | `422` |
 | Running jobs per pool | Dispatcher allowances (already exact) | Jobs wait `READY` |
 
-- **Shedding:** every `api` node samples each unpaused pool's oldest `READY` age and its own connection-pool saturation, at most every 2 s.
+- **Shedding:** every `api` node samples each unpaused pool's oldest `READY` age and its own connection-pool saturation, at most every 2 s. *Amended by [ADR-021](ADR-021-pool-backlog.md): the age is the pool owner's measure of dispatchable work, and the thresholds are the pool's backlog target (`LOW`) and three times it (`NORMAL`).*
   - A pool older than `JS_SHED_LOW_AFTER` (5 min) rejects `LOW` submissions.
   - Older than `JS_SHED_NORMAL_AFTER` (15 min), it rejects `NORMAL` ones too.
   - A saturated connection pool (every connection in use and callers waiting) sheds `LOW`.
@@ -73,7 +73,7 @@
 ## Trade-offs
 
 - The pending quota is soft, with up to about 5 s of overshoot. It protects the platform, not billing.
-- A paused job type's backlog counts toward its pool's age. A paused pool is excluded.
+- A paused job type's backlog counts toward its pool's age. A paused pool is excluded. *Amended by [ADR-021](ADR-021-pool-backlog.md): paused and capped work no longer counts.*
 - Each node applies its share of a tenant's rate (rate ÷ replicas), which is exact only while load spreads evenly across nodes (the known limitation of [ADR-011](ADR-011-caching-and-redis.md)).
 
 ## Consequences

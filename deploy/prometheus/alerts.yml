@@ -14,18 +14,18 @@ groups:
           description: Due jobs take more than 1 s to become READY (NFR-3). Check the promoter and database latency.
 
       - alert: BacklogAge
-        # Replace 300 with per-pool targets once pools have agreed backlog SLOs.
-        expr: max by (pool) (jobs_oldest_ready_age_seconds) > 300
+        # Each pool's own target (PUT /v1/pools/{name}/settings), or JS_BACKLOG_TARGET (ADR-021).
+        expr: max by (pool) (jobs_oldest_ready_age_seconds) > max by (pool) (pool_backlog_target_seconds)
         for: 10m
         labels:
           severity: page
         annotations:
-          summary: "Pool {{ $labels.pool }}: oldest READY job has waited {{ $value | humanizeDuration }}"
-          description: Workers are not keeping up. Scale the pool's workers, or check for a held pool or job type.
+          summary: "Pool {{ $labels.pool }}: oldest dispatchable job has waited {{ $value | humanizeDuration }}, past its target"
+          description: Workers are not keeping up, or the pool has none. Scale the pool's workers. Held work (jobs_held) doesn't count.
 
       - alert: DispatchStalled
-        # READY work and free slots, but nothing handed out. Also fires for a paused pool, or
-        # when the free workers cannot run the waiting job types.
+        # Dispatchable work and free slots, but nothing handed out. Paused and capped work is
+        # excluded; this still fires when the free workers can't run the waiting job types.
         expr: |
           (sum by (pool) (jobs_ready) > 0)
             and (sum by (pool) (worker_slots{state="free"}) > 0)
@@ -35,7 +35,7 @@ groups:
           severity: page
         annotations:
           summary: "Pool {{ $labels.pool }} has READY jobs and free slots but dispatches nothing"
-          description: Check the pool owner's logs, pool and job-type holds, and worker job types.
+          description: Check the pool owner's logs, and the job types the free workers run.
 
       - alert: NoPoolOwner
         expr: max(pools_unowned) > 0
@@ -43,8 +43,8 @@ groups:
         labels:
           severity: page
         annotations:
-          summary: "{{ $value }} pool(s) with live workers have no owner"
-          description: No engine holds the pool lease, so its jobs are not dispatched. Check engine health and lease renewal.
+          summary: "{{ $value }} pool(s) with workers or READY jobs have no owner"
+          description: No engine holds the pool lease, so its jobs are not dispatched or measured. Check engine health and lease renewal.
 
       - alert: DeadLetterSpike
         expr: |

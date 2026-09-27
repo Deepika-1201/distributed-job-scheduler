@@ -176,6 +176,23 @@ func TestLoadTelemetrySettings(t *testing.T) {
 	}
 }
 
+func TestLoadBacklogTarget(t *testing.T) {
+	for value, want := range map[string]time.Duration{"": 5 * time.Minute, "20m": 20 * time.Minute} {
+		cfg, err := Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs", "JS_BACKLOG_TARGET": value}))
+		if err != nil || cfg.BacklogTarget != want {
+			t.Errorf("JS_BACKLOG_TARGET=%q: %v, %v; want %v", value, cfg.BacklogTarget, err, want)
+		}
+	}
+	_, err := Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs", "JS_BACKLOG_TARGET": "5s",
+		"JS_SHED_LOW_AFTER": "5m", "JS_SHED_NORMAL_AFTER": "15m"}))
+	for _, want := range []string{"JS_BACKLOG_TARGET: must be between 10s and 24h",
+		"JS_SHED_LOW_AFTER: was removed: set JS_BACKLOG_TARGET", "JS_SHED_NORMAL_AFTER: was removed"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+}
+
 func TestLoadNeverEchoesDatabaseURL(t *testing.T) {
 	_, err := Load(env(map[string]string{
 		"JS_DATABASE_URL": "postgres://user:s3cret@db/jobs",

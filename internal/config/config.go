@@ -32,14 +32,16 @@ type Roles []Role
 func (r Roles) Has(role Role) bool { return slices.Contains(r, role) }
 
 type Config struct {
-	Roles           Roles
-	HTTPAddr        string
-	OpsAddr         string
-	API             API
-	Engine          Engine
-	Database        Database
-	Log             Log
-	Telemetry       Telemetry
+	Roles     Roles
+	HTTPAddr  string
+	OpsAddr   string
+	API       API
+	Engine    Engine
+	Database  Database
+	Log       Log
+	Telemetry Telemetry
+	// BacklogTarget is the backlog target of pools without their own (ADR-021).
+	BacklogTarget   time.Duration
 	ShutdownDelay   time.Duration
 	ShutdownTimeout time.Duration
 }
@@ -69,9 +71,6 @@ type API struct {
 	Replicas        int
 	// MinScheduleInterval is the shortest interval a schedule may fire at (LLD §10.2).
 	MinScheduleInterval time.Duration
-	// ShedLowAfter and ShedNormalAfter are the pool backlog ages at which LOW and NORMAL
-	// submissions are rejected (ADR-018).
-	ShedLowAfter, ShedNormalAfter time.Duration
 }
 
 // NodeRateLimit is the share of the tenant rate limit enforced by one api replica.
@@ -99,8 +98,6 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 			TenantRateLimit:     p.floatInRange("JS_TENANT_RATE_LIMIT", 500, 1, 1e6),
 			Replicas:            p.intInRange("JS_API_REPLICAS", 1, 1, 1000),
 			MinScheduleInterval: p.duration("JS_MIN_SCHEDULE_INTERVAL", time.Minute),
-			ShedLowAfter:        p.duration("JS_SHED_LOW_AFTER", 5*time.Minute),
-			ShedNormalAfter:     p.duration("JS_SHED_NORMAL_AFTER", 15*time.Minute),
 		},
 		Database: Database{
 			URL:      p.required("JS_DATABASE_URL"),
@@ -115,6 +112,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 			OTLPInsecure: p.oneOf("JS_OTLP_INSECURE", "false", "true", "false") == "true",
 			SampleRatio:  p.floatInRange("JS_TRACE_SAMPLE_RATIO", 1, 0, 1),
 		},
+		BacklogTarget:   p.duration("JS_BACKLOG_TARGET", 5*time.Minute),
 		ShutdownDelay:   p.duration("JS_SHUTDOWN_DELAY", 0),
 		ShutdownTimeout: p.duration("JS_SHUTDOWN_TIMEOUT", 30*time.Second),
 	}
@@ -147,8 +145,13 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	if cfg.API.MinScheduleInterval < time.Second {
 		p.fail("JS_MIN_SCHEDULE_INTERVAL", "must be at least 1s")
 	}
-	if cfg.API.ShedLowAfter <= 0 || cfg.API.ShedNormalAfter < cfg.API.ShedLowAfter {
-		p.fail("JS_SHED_NORMAL_AFTER", "must be at least JS_SHED_LOW_AFTER, which must be positive")
+	if cfg.BacklogTarget < 10*time.Second || cfg.BacklogTarget > 24*time.Hour {
+		p.fail("JS_BACKLOG_TARGET", "must be between 10s and 24h")
+	}
+	for _, removed := range []string{"JS_SHED_LOW_AFTER", "JS_SHED_NORMAL_AFTER"} {
+		if _, set := p.get(removed); set {
+			p.fail(removed, "was removed: set JS_BACKLOG_TARGET; LOW is shed past it and NORMAL past three times it (ADR-021)")
+		}
 	}
 	if err := errors.Join(p.errs...); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration:\n%w", err)

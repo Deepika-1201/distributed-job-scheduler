@@ -30,6 +30,23 @@ func TestPlatformEndpointsNeedPlatformAdmin(t *testing.T) {
 		t.Error("resume did not clear the hold")
 	}
 	e.call("POST", "/v1/pools/Bad%20Name/pause", root, "").wantError(http.StatusUnprocessableEntity, "invalid_argument")
+	if pool := pools[0].(map[string]any); pool["backlog_target"] != "5m0s" || pool["backlog_age"] != nil {
+		t.Errorf("pool before any owner sample = %v, want the default target and no backlog age", pool)
+	}
+	e.call("PUT", "/v1/pools/default/settings", e.admin, `{"backlog_target": "1h"}`).wantError(http.StatusForbidden, "permission_denied")
+	for _, body := range []string{`{"backlog_target": "5s"}`, `{"backlog_target": "25h"}`, `{"backlog_target": "soon"}`} {
+		if e.call("PUT", "/v1/pools/default/settings", root, body).wantError(http.StatusUnprocessableEntity, "invalid_argument").
+			fieldError("backlog_target") == nil {
+			t.Errorf("%s: no error for backlog_target", body)
+		}
+	}
+	if set := e.call("PUT", "/v1/pools/default/settings", root, `{"backlog_target": "1h"}`).want(http.StatusOK); set.str("backlog_target") != "1h0m0s" {
+		t.Errorf("pool after setting a target = %v", set.body)
+	}
+	if reset := e.call("PUT", "/v1/pools/default/settings", root, `{}`).want(http.StatusOK); reset.str("backlog_target") != "5m0s" {
+		t.Errorf("pool after resetting the target = %v", reset.body)
+	}
+	e.call("PUT", "/v1/pools/batch/settings", root, `{"backlog_target": "2h"}`).want(http.StatusOK) // configured before any job type uses it
 	if workers, _ := e.call("GET", "/v1/workers?pool=default", root, "").want(http.StatusOK).get("items").([]any); len(workers) != 0 {
 		t.Errorf("workers = %v, want none", workers)
 	}

@@ -112,37 +112,9 @@ func TestTransitionMetrics(t *testing.T) {
 	}
 }
 
-func TestSamplePoolGaugesAndUnownedPools(t *testing.T) {
+func TestClockOffset(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	f.submit(f.newJob(func(nj *NewJob) { nj.Priority = domain.PriorityHigh }))
-	f.submit(f.newJob())
-	f.submit(f.newJob())
-	ws := f.session("default") // 4 slots
-	if n, err := f.store.UnownedPools(ctx); err != nil || n != 1 {
-		t.Errorf("UnownedPools before a lease = %d, %v; want 1", n, err)
-	}
-	f.claimFor(ws, 1, nil)
-	if n, err := f.store.UnownedPools(ctx); err != nil || n != 0 {
-		t.Errorf("UnownedPools with a lease = %d, %v; want 0", n, err)
-	}
-
-	g, err := f.store.SamplePoolGauges(ctx, "default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.Ready[domain.PriorityHigh] != 1 || g.Ready[domain.PriorityNormal] != 1 || len(g.Ready) != 2 {
-		t.Errorf("Ready = %v, want one HIGH and one NORMAL", g.Ready)
-	}
-	if g.Running[f.tenant] != 1 || len(g.Running) != 1 {
-		t.Errorf("Running = %v, want one for the tenant", g.Running)
-	}
-	if g.SlotsBusy != 1 || g.SlotsFree != 3 {
-		t.Errorf("slots busy %d, free %d; want 1 and 3", g.SlotsBusy, g.SlotsFree)
-	}
-	if g.OldestReady <= 0 || g.OldestReady > time.Minute {
-		t.Errorf("OldestReady = %v", g.OldestReady)
-	}
 	if off, err := f.store.ClockOffset(ctx); err != nil || off.Abs() > time.Second {
 		t.Errorf("ClockOffset = %v, %v; the test database shares this clock", off, err)
 	}
