@@ -598,7 +598,7 @@ Decision record: [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.md).
   - trace context and a progress hook.
 - **Heartbeats** every 5 s per *session*, not per job, listing running attempts and progress.
 - **Enforces the attempt deadline** locally on a monotonic clock: it cancels the handler and reports `TIMED_OUT`.
-- **Self-fences:** if it cannot renew its session for TTL minus a safety margin (25 s of a 30 s TTL), it cancels running handlers and discards their results.
+- **Self-fences:** if it cannot renew its session for TTL minus a safety margin (25 s of a 30 s TTL), it cancels running handlers and discards their results. It takes no new work until it has registered again.
 - **Drains** on `SIGTERM`: stops polling, lets in-flight attempts finish within the grace period, reports them, and deregisters. Attempts that can't finish in time are released and retried.
 
 ### 12.2 Worker sessions and leases
@@ -1122,7 +1122,8 @@ Job types, schedules and jobs belong to a tenant. Pools are platform resources o
 | `jobs_running` | Gauge | pool, tenant | Concurrency |
 | `jobs_completed_total` | Counter | type, state | Succeeded, failed, dead-lettered, cancelled, expired, skipped |
 | `scheduling_lag_seconds` | Histogram | pool | `ready_at − run_at` (NFR-3) |
-| `dispatch_latency_seconds` | Histogram | pool, priority | `started_at − ready_at` (NFR-4) |
+| `dispatch_latency_seconds` | Histogram | pool, priority | From when a worker was free for the job to its start: `started_at − max(ready_at, poll arrival)` (NFR-4, [ADR-022](decisions/ADR-022-dispatch-latency-from-a-free-worker.md)) |
+| `queue_wait_seconds` | Histogram | pool, priority | `started_at − ready_at`, including waiting for a free worker |
 | `execution_duration_seconds` | Histogram | type, outcome | How long attempts take |
 | `attempts_total` | Counter | type, outcome | Success, failure, timeout and lost rates |
 | `jobs_retried_total` | Counter | type, reason | Retry rate |
@@ -1135,7 +1136,7 @@ Job types, schedules and jobs belong to a tenant. Pools are platform resources o
 | `db_pool_in_use` | Gauge | role | Connection pressure |
 | `outbox_lag_seconds` *(later)* | Gauge | stream | Event publication health |
 
-These cover every metric in the original brief: `jobs_queued` and `queue_depth` map to `jobs_ready`; `scheduler_lag` maps to `scheduling_lag_seconds`; `worker_utilization` maps to `worker_slots`; `execution_latency` maps to `dispatch_latency_seconds` and `execution_duration_seconds`; `retry_rate` is derived from `jobs_retried_total`.
+These cover every metric in the original brief: `jobs_queued` and `queue_depth` map to `jobs_ready`; `scheduler_lag` maps to `scheduling_lag_seconds`; `worker_utilization` maps to `worker_slots`; `execution_latency` maps to `queue_wait_seconds`, `dispatch_latency_seconds` and `execution_duration_seconds`; `retry_rate` is derived from `jobs_retried_total`.
 
 ### 17.4 Logging
 
@@ -1370,14 +1371,16 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-011](decisions/ADR-011-caching-and-redis.md) | Caching and Redis | Accepted |
 | [ADR-012](decisions/ADR-012-language-and-core-libraries.md) | Language and core libraries | Accepted; amended by ADR-013 and ADR-014 |
 | [ADR-013](decisions/ADR-013-cron-evaluation.md) | Cron evaluation with explicit DST rules | Accepted |
-| [ADR-014](decisions/ADR-014-worker-protocol.md) | Worker protocol: unary calls, long-poll and owner redirects | Accepted |
+| [ADR-014](decisions/ADR-014-worker-protocol.md) | Worker protocol: unary calls, long-poll and owner redirects | Accepted; amended by ADR-023 |
 | [ADR-015](decisions/ADR-015-releasing-undelivered-assignments.md) | Releasing assignments that were never delivered | Accepted |
 | [ADR-016](decisions/ADR-016-withdrawing-provisional-schedule-jobs.md) | Schedule changes withdraw provisional jobs by deleting them | Accepted |
 | [ADR-017](decisions/ADR-017-platform-administration.md) | Platform administration: platform-admin role, dispatch holds and worker drain | Accepted |
 | [ADR-018](decisions/ADR-018-quotas-and-load-shedding.md) | Tenant quotas and priority-aware load shedding | Accepted |
 | [ADR-019](decisions/ADR-019-payload-json-schema.md) | Payload validation with JSON Schema | Accepted |
-| [ADR-020](decisions/ADR-020-telemetry.md) | Telemetry: pulled metrics, linked attempt traces, owner-reported pool gauges | Accepted |
+| [ADR-020](decisions/ADR-020-telemetry.md) | Telemetry: pulled metrics, linked attempt traces, owner-reported pool gauges | Accepted; amended by ADR-021 and ADR-022 |
 | [ADR-021](decisions/ADR-021-pool-backlog.md) | Pool backlog: dispatchable work, measured by the owner, against per-pool targets | Accepted |
+| [ADR-022](decisions/ADR-022-dispatch-latency-from-a-free-worker.md) | Dispatch latency counts from a free worker | Accepted |
+| [ADR-023](decisions/ADR-023-session-calls-fall-back-to-the-owner.md) | Worker session calls fall back to the pool owner | Accepted |
 
 ## Appendix C — Open questions for the LLD
 

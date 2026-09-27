@@ -49,7 +49,8 @@
 ## Decision
 
 - **A pool's backlog is its dispatchable `READY` work.**
-  - A `READY` job is *held* while its pool or job type is paused, or its tenant is at its running cap in the pool.
+  - A `READY` job is *held* while its pool or job type is paused.
+  - A tenant with more jobs waiting than its running cap lets it start now is held back by the cap. The jobs beyond that allowance are held, and none of its jobs set the backlog age: their wait comes from the cap, not from the pool.
   - Jobs past their start deadline are left out, as claims skip them.
   - Backlog age is measured from `run_at`: how long the oldest dispatchable job has been due, as in ADR-018.
 - **Metrics (amends ADR-020):**

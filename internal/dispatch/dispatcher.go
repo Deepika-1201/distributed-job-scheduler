@@ -355,6 +355,7 @@ func (d *Dispatcher) refreshWanted(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		if pools, err := d.store.WantedPools(ctx); err == nil {
+			initPoolCounters(pools)
 			now := time.Now()
 			d.mu.Lock()
 			for _, p := range pools {

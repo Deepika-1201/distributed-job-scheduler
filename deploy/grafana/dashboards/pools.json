@@ -97,7 +97,11 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
         },
         "overrides": []
       },
@@ -142,7 +146,11 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
         },
         "overrides": []
       },
@@ -187,7 +195,11 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
         },
         "overrides": []
       },
@@ -300,7 +312,8 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -349,9 +362,10 @@
             "fillOpacity": 10,
             "showPoints": "never",
             "stacking": {
-              "mode": "normal"
+              "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -390,7 +404,7 @@
       "gridPos": {
         "x": 0,
         "y": 14,
-        "w": 24,
+        "w": 12,
         "h": 8
       },
       "fieldConfig": {
@@ -402,7 +416,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -440,6 +455,67 @@
       "id": 8
     },
     {
+      "type": "timeseries",
+      "title": "Queue wait by priority",
+      "description": "READY to started, including waiting for a free worker. When the pool is short of slots, lower priorities wait longer: slots are shared 8:4:2:1 (LLD §7).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (priority, le) (rate(queue_wait_seconds_bucket{pool=~\"$pool\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{priority}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.5, sum by (priority, le) (rate(queue_wait_seconds_bucket{pool=~\"$pool\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{priority}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 18
+    },
+    {
       "type": "row",
       "title": "Capacity",
       "collapsed": false,
@@ -475,7 +551,8 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -526,7 +603,8 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -570,7 +648,7 @@
     {
       "type": "timeseries",
       "title": "Dispatch latency by priority",
-      "description": "",
+      "description": "From when a worker was free for the job to its start (NFR-4: p99 at most 1 s). Waiting for a busy worker is queue wait.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -590,7 +668,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -650,7 +729,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -723,7 +803,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -783,7 +864,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },

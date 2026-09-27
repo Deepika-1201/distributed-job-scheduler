@@ -1,8 +1,10 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -61,55 +63,60 @@ type PoolGauges struct {
 }
 
 // SamplePoolGauges reads, from one snapshot, the pool's READY jobs split into dispatchable and
-// held work, and its running jobs, worker slots and backlog target. capped lists the tenants
-// at their running cap in the pool.
-func (s *Store) SamplePoolGauges(ctx context.Context, pool string, capped []domain.TenantID) (PoolGauges, error) {
+// held work, and its running jobs, worker slots and backlog target. caps are the running-job
+// caps of the tenants that have one.
+func (s *Store) SamplePoolGauges(ctx context.Context, pool string, caps map[domain.TenantID]int) (PoolGauges, error) {
 	var g PoolGauges
 	err := s.inSnapshot(ctx, func(tx pgx.Tx) error {
 		var err error
-		g, err = samplePoolGauges(ctx, tx, pool, capped)
+		g, err = samplePoolGauges(ctx, tx, pool, caps)
 		return err
 	})
 	return g, err
 }
 
-func samplePoolGauges(ctx context.Context, tx pgx.Tx, pool string, capped []domain.TenantID) (PoolGauges, error) {
+type readyGroup struct {
+	priority domain.Priority
+	n        int
+	due      time.Time
+	age      time.Duration
+}
+
+func samplePoolGauges(ctx context.Context, tx pgx.Tx, pool string, caps map[domain.TenantID]int) (PoolGauges, error) {
 	g := PoolGauges{Ready: map[domain.Priority]int{}, Held: map[string]int{}, Running: map[domain.TenantID]int{}}
 	var (
 		priority int16
+		tenant   string
 		held     string
 		n        int
 		due      time.Time
 		age      float64
 	)
+	unpaused := map[domain.TenantID][]readyGroup{}
 	rows, err := tx.Query(ctx, `
-		SELECT priority,
+		SELECT priority, tenant_id::text,
 		    CASE WHEN EXISTS (SELECT 1 FROM pools WHERE name = $1 AND paused) THEN '`+HeldPoolPaused+`'
 		         WHEN NOT `+notHeldSQL+` THEN '`+HeldJobTypePaused+`'
-		         WHEN tenant_id = ANY ($2::uuid[]) THEN '`+HeldTenantCap+`'
 		         ELSE '' END,
 		    count(*), min(run_at), extract(epoch FROM now() - min(run_at))::float8
 		FROM jobs
 		WHERE pool = $1 AND state = 'READY' AND (start_deadline IS NULL OR start_deadline > now() OR attempt_count > 0)
-		GROUP BY 1, 2`, pool, uuidArray(capped))
+		GROUP BY 1, 2, 3`, pool)
 	if err != nil {
 		return PoolGauges{}, err
 	}
-	if _, err := pgx.ForEachRow(rows, []any{&priority, &held, &n, &due, &age}, func() error {
+	if _, err := pgx.ForEachRow(rows, []any{&priority, &tenant, &held, &n, &due, &age}, func() error {
 		if held != "" {
 			g.Held[held] += n
-			return nil
-		}
-		g.Ready[domain.Priority(priority)] += n
-		if g.OldestDue.IsZero() || due.Before(g.OldestDue) {
-			g.OldestDue, g.OldestAge = due, time.Duration(age*float64(time.Second))
+		} else {
+			t := domain.TenantID(tenant)
+			unpaused[t] = append(unpaused[t], readyGroup{domain.Priority(priority), n, due, time.Duration(age * float64(time.Second))})
 		}
 		return nil
 	}); err != nil {
 		return PoolGauges{}, err
 	}
 
-	var tenant string
 	rows, err = tx.Query(ctx, `
 		SELECT tenant_id::text, count(*) FROM jobs WHERE pool = $1 AND state = 'RUNNING' GROUP BY tenant_id`, pool)
 	if err != nil {
@@ -122,6 +129,9 @@ func samplePoolGauges(ctx context.Context, tx pgx.Tx, pool string, capped []doma
 		return nil
 	}); err != nil {
 		return PoolGauges{}, err
+	}
+	for t, groups := range unpaused {
+		g.classify(groups, caps, t)
 	}
 
 	var (
@@ -137,6 +147,34 @@ func samplePoolGauges(ctx context.Context, tx pgx.Tx, pool string, capped []doma
 	g.SlotsFree = slots - g.SlotsBusy
 	g.BacklogTarget = msDuration(target)
 	return g, nil
+}
+
+// classify splits a tenant's unpaused READY jobs into dispatchable and held work. A tenant
+// with more waiting than its running cap lets it start now is held back by the cap: only that
+// allowance is dispatchable, counted against its most urgent work, and its jobs don't set the
+// backlog age, because their wait comes from the cap rather than the pool.
+func (g *PoolGauges) classify(groups []readyGroup, caps map[domain.TenantID]int, t domain.TenantID) {
+	total := 0
+	for _, gr := range groups {
+		total += gr.n
+	}
+	limit, capped := caps[t]
+	if allowance := max(0, limit-g.Running[t]); capped && allowance < total {
+		g.Held[HeldTenantCap] += total - allowance
+		slices.SortFunc(groups, func(a, b readyGroup) int { return cmp.Compare(b.priority, a.priority) })
+		for _, gr := range groups {
+			take := min(gr.n, allowance)
+			g.Ready[gr.priority] += take
+			allowance -= take
+		}
+		return
+	}
+	for _, gr := range groups {
+		g.Ready[gr.priority] += gr.n
+		if g.OldestDue.IsZero() || gr.due.Before(g.OldestDue) {
+			g.OldestDue, g.OldestAge = gr.due, gr.age
+		}
+	}
 }
 
 // RecordPoolBacklog stores the owner's latest sample on the pool row, for api nodes to shed

@@ -98,6 +98,7 @@ var ErrDrained = errors.New("workersdk: worker drained by an operator")
 
 const (
 	completeTimeout = 10 * time.Minute
+	callTimeout     = 10 * time.Second
 	reportGrace     = 10 * time.Second
 	fenceMargin     = 5 * time.Second
 	minBackoff      = 500 * time.Millisecond
@@ -215,8 +216,12 @@ func (w *worker) register(ctx context.Context) error {
 		types = append(types, t)
 	}
 	for backoff := minBackoff; ; backoff = min(2*backoff, maxBackoff) {
-		resp, err := w.client.Register(ctx, &workerpb.RegisterRequest{Pool: w.cfg.Pool, JobTypes: types,
-			Slots: int32(w.cfg.Slots), Labels: w.cfg.Labels, WorkerId: w.cfg.WorkerID, RuntimeVersion: "go-sdk/1"})
+		var resp *workerpb.RegisterResponse
+		err := w.call(ctx, callTimeout, func(ctx context.Context, c workerpb.WorkerServiceClient) (err error) {
+			resp, err = c.Register(ctx, &workerpb.RegisterRequest{Pool: w.cfg.Pool, JobTypes: types,
+				Slots: int32(w.cfg.Slots), Labels: w.cfg.Labels, WorkerId: w.cfg.WorkerID, RuntimeVersion: "go-sdk/1"})
+			return err
+		})
 		if err == nil {
 			w.mu.Lock()
 			w.session, w.ttl, w.interval = resp.SessionId, resp.LeaseTtl.AsDuration(), resp.HeartbeatInterval.AsDuration()
@@ -270,10 +275,46 @@ func (w *worker) renewSession(ctx context.Context, generation int) {
 	close(done)
 }
 
+// awaitRenewal waits while the session is being replaced: work taken on the abandoned session
+// could not be kept alive or reported. It returns false if ctx ends first.
+func (w *worker) awaitRenewal(ctx context.Context) bool {
+	w.mu.Lock()
+	renewing := w.renewing
+	w.mu.Unlock()
+	if renewing == nil {
+		return true
+	}
+	select {
+	case <-renewing:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (w *worker) sessionInfo() (string, int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.session, w.generation
+}
+
+// call runs an RPC that every engine node serves, on the configured address. When that
+// address is unreachable while the worker polls a pool owner, it retries on the owner, so
+// losing the configured node doesn't cut off a session the owner is still feeding (ADR-023).
+func (w *worker) call(ctx context.Context, timeout time.Duration, rpc func(context.Context, workerpb.WorkerServiceClient) error) error {
+	on := func(client workerpb.WorkerServiceClient) error {
+		callCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return rpc(callCtx, client)
+	}
+	err := on(w.client)
+	if code := status.Code(err); (code != codes.Unavailable && code != codes.DeadlineExceeded) || ctx.Err() != nil {
+		return err
+	}
+	if owner, redirected := w.pollTarget(); redirected {
+		return on(owner)
+	}
+	return err
 }
 
 // requestDrain stops polling; Run then drains running work and deregisters.
@@ -301,6 +342,9 @@ func (w *worker) poll(ctx context.Context) {
 			case <-w.slotFreed:
 			}
 			continue
+		}
+		if !w.awaitRenewal(ctx) {
+			return
 		}
 		session, generation := w.sessionInfo()
 		client, redirected := w.pollTarget()
@@ -394,7 +438,7 @@ func (w *worker) start(a *workerpb.Assignment, generation int) {
 	ctx, cancelTimeout := context.WithDeadline(ctx, job.Deadline)
 	att := &attempt{job: job, cancel: cancel, span: span}
 	w.mu.Lock()
-	if w.generation != generation {
+	if w.generation != generation || w.renewing != nil {
 		w.mu.Unlock()
 		cancelTimeout()
 		cancel(errStale)
@@ -509,9 +553,10 @@ func (w *worker) complete(req *workerpb.CompleteRequest, att *attempt) {
 	req.SessionId, _ = w.sessionInfo()
 	deadline := time.Now().Add(completeTimeout)
 	for backoff := 200 * time.Millisecond; time.Now().Before(deadline); backoff = min(2*backoff, 5*time.Second) {
-		ctx, cancel := context.WithTimeout(trace.ContextWithSpan(w.reports, att.span), 10*time.Second)
-		_, err := w.client.Complete(ctx, req)
-		cancel()
+		err := w.call(trace.ContextWithSpan(w.reports, att.span), callTimeout, func(ctx context.Context, c workerpb.WorkerServiceClient) error {
+			_, err := c.Complete(ctx, req)
+			return err
+		})
 		switch status.Code(err) {
 		case codes.OK:
 			return
@@ -546,9 +591,11 @@ func (w *worker) heartbeats(ctx context.Context) {
 			}
 		}
 		w.mu.Unlock()
-		callCtx, cancel := context.WithTimeout(ctx, interval)
-		resp, err := w.client.Heartbeat(callCtx, &workerpb.HeartbeatRequest{SessionId: session, Running: running})
-		cancel()
+		var resp *workerpb.HeartbeatResponse
+		err := w.call(ctx, interval, func(ctx context.Context, c workerpb.WorkerServiceClient) (err error) {
+			resp, err = c.Heartbeat(ctx, &workerpb.HeartbeatRequest{SessionId: session, Running: running})
+			return err
+		})
 		switch {
 		case ctx.Err() != nil:
 			return
@@ -609,9 +656,11 @@ func (w *worker) drain() {
 
 func (w *worker) deregister() {
 	session, _ := w.sessionInfo()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := w.client.Deregister(ctx, &workerpb.DeregisterRequest{SessionId: session}); err != nil {
+	err := w.call(context.Background(), 5*time.Second, func(ctx context.Context, c workerpb.WorkerServiceClient) error {
+		_, err := c.Deregister(ctx, &workerpb.DeregisterRequest{SessionId: session})
+		return err
+	})
+	if err != nil {
 		w.log.Warn("deregister failed; the session will expire", "error", err)
 	}
 }

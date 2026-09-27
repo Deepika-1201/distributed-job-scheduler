@@ -104,9 +104,9 @@ func TestPerTenantRateLimit(t *testing.T) {
 	e.call("GET", "/v1/tenants", root, "").want(http.StatusOK) // other tenants keep the default rate
 }
 
-// sampleBacklog records the default pool's backlog as its owner would (ADR-021); capped lists
-// the tenants at their running cap.
-func (e *env) sampleBacklog(capped ...domain.TenantID) {
+// sampleBacklog records the default pool's backlog as its owner would (ADR-021); caps are
+// the tenants' running-job caps.
+func (e *env) sampleBacklog(caps map[domain.TenantID]int) {
 	e.t.Helper()
 	name := postgres.PoolLeaseName("default")
 	l, err := e.store.GetLease(ctx, name)
@@ -116,7 +116,7 @@ func (e *env) sampleBacklog(capped ...domain.TenantID) {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	g, err := e.store.SamplePoolGauges(ctx, "default", capped)
+	g, err := e.store.SamplePoolGauges(ctx, "default", caps)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestOverloadedPoolShedsLowThenNormal(t *testing.T) {
 			id, age.Seconds()); err != nil {
 			t.Fatal(err)
 		}
-		e.sampleBacklog()
+		e.sampleBacklog(nil)
 	}
 	operator := e.key(e.tenant, domain.RoleOperator)
 	submit := func(priority string) response {
@@ -165,11 +165,11 @@ func TestOverloadedPoolShedsLowThenNormal(t *testing.T) {
 	e.call("PUT", "/v1/pools/default/settings", root, `{}`).want(http.StatusOK)
 	submit("LOW").wantError(http.StatusServiceUnavailable, "overloaded")
 
-	e.sampleBacklog(e.tenant)
-	submit("LOW").want(http.StatusCreated) // a tenant at its running cap sheds nobody
-	e.sampleBacklog()
+	e.sampleBacklog(map[domain.TenantID]int{e.tenant: 1})
+	submit("LOW").want(http.StatusCreated) // a tenant limited by its running cap sheds nobody
+	e.sampleBacklog(nil)
 	e.call("POST", "/v1/pools/default/pause", root, "").want(http.StatusOK)
-	e.sampleBacklog()
+	e.sampleBacklog(nil)
 	submit("LOW").want(http.StatusCreated) // a paused pool's backlog is expected, not overload
 
 	if _, err := e.pool.Exec(ctx, `UPDATE pools SET sampled_at = now() - interval '2 minutes'`); err != nil {

@@ -104,7 +104,8 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -155,7 +156,8 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -206,7 +208,8 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -257,7 +260,8 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -321,7 +325,8 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },

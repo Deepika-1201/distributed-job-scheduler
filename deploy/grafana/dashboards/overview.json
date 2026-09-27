@@ -1,7 +1,7 @@
 {
   "uid": "js-overview",
   "title": "Job scheduler: platform overview",
-  "description": "SLOs, throughput, backlog and lag (HLD \u00a717.5). Metrics are defined in HLD \u00a717.3.",
+  "description": "SLOs, throughput, backlog and lag (HLD §17.5). Metrics are defined in HLD §17.3.",
   "tags": [
     "jobscheduler"
   ],
@@ -118,7 +118,7 @@
     {
       "type": "stat",
       "title": "Dispatch latency p99",
-      "description": "READY to started, all pools. NFR-4: p99 at most 1 s.",
+      "description": "READY to started, counted from when a worker was free for the job, all pools. NFR-4: p99 at most 1 s.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -179,7 +179,7 @@
     {
       "type": "stat",
       "title": "API 5xx ratio",
-      "description": "NFR-7 allows 0.1% of a month; the APIErrors alert fires above 1% for 5 minutes.",
+      "description": "Load shedding's 503s count: shed submissions were not served. NFR-7 allows 0.1% of a month; the APIErrors alert fires above 1% for 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -338,7 +338,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -398,7 +399,8 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -449,7 +451,8 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -500,7 +503,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -560,7 +564,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -624,7 +629,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -684,7 +690,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -757,7 +764,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
@@ -797,7 +805,7 @@
     {
       "type": "timeseries",
       "title": "Dispatch latency p99 by pool",
-      "description": "From READY to an attempt handed to a worker.",
+      "description": "From when a worker was free for the job to its start. Waiting for a busy worker shows as queue wait on the pools dashboard.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -817,7 +825,8 @@
             "stacking": {
               "mode": "none"
             }
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },

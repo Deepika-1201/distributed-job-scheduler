@@ -20,7 +20,8 @@ var (
 	PoolOwnerChanges = counter("pool_owner_changes", "{change}", "Pool leases acquired by this node (pool)")
 
 	SchedulingLag     = histogram("scheduling_lag", "s", "Due time to READY (pool)", latencyBuckets)
-	DispatchLatency   = histogram("dispatch_latency", "s", "READY to attempt start (pool, priority)", latencyBuckets)
+	DispatchLatency   = histogram("dispatch_latency", "s", "READY to attempt start, from when a worker was free for the job (pool, priority)", latencyBuckets)
+	QueueWait         = histogram("queue_wait", "s", "READY to attempt start, including waiting for a free worker (pool, priority)", waitBuckets)
 	ExecutionDuration = histogram("execution_duration", "s", "Attempt run time (type, outcome)", durationBuckets)
 	DBTransaction     = histogram("db_transaction_duration", "s", "Database transaction time (operation)", dbBuckets)
 
@@ -38,6 +39,7 @@ var (
 
 var (
 	latencyBuckets  = []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300}
+	waitBuckets     = []float64{0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 10800, 43200, 86400} // up to the longest backlog target
 	durationBuckets = []float64{0.01, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 900, 3600}
 	dbBuckets       = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5}
 )

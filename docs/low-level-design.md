@@ -633,6 +633,7 @@ Implements HLD §12 and [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.m
 - The worker keeps one connection to its configured address for `Register`, `Heartbeat`, `Complete` and `Deregister`, and a second one for `Poll`.
 - On a redirect it re-dials the poll connection to the owner.
 - If the owner is unreachable, it falls back to the configured address with exponential backoff (0.5 s doubling to 10 s, full jitter).
+- If the configured address is unreachable while the worker polls an owner, its other calls are retried once on the owner's connection, since every node serves them ([ADR-023](decisions/ADR-023-session-calls-fall-back-to-the-owner.md)). A worker that the owner is feeding keeps its session, and its reports land.
 
 ### 12.2 Sessions (phase 8 migration)
 
@@ -683,6 +684,7 @@ Every engine node runs the gRPC server, plus a pool lease manager (§11.3).
 - **Deadlines:** the attempt timeout is enforced locally on the monotonic clock, starting when the assignment is received.
 - **Completions** retry with backoff until accepted, rejected as stale, or 10 minutes pass.
 - **Self-fencing:** if no heartbeat succeeds for `lease TTL − 5 s` (25 s), the worker cancels every handler, drops their results and re-registers.
+- **No work on an abandoned session:** after self-fencing, or when the engine reports the session gone, the worker doesn't poll until it has registered again. It drops assignments that arrive for the old session; the engine recovers them as lost attempts.
 - **One renewal at a time:** when the poll loop and the heartbeat loop both find the session gone, one re-registers. The other waits for it only until its own context ends, so shutdown never waits on re-registration against an engine that is down.
 - **Drain** (context cancelled):
   1. Stop polling.
@@ -695,7 +697,10 @@ Every engine node runs the gRPC server, plus a pool lease manager (§11.3).
 - Store: sessions, typed claims, exact tenant caps, release.
 - Dispatcher: per-slot weighted allocation.
 - End to end: an in-process engine and SDK workers over real gRPC. Covers success, retry then success, permanent failure, cancellation delivered through heartbeats, timeout, and a worker redirected from a non-owner engine to the owner.
-- SDK: against a fake engine that has become unreachable, `Run` still returns promptly once cancelled while the heartbeat loop keeps retrying re-registration.
+- SDK, against fake engines:
+  - `Run` still returns promptly once cancelled while the heartbeat loop keeps retrying re-registration with an unreachable engine;
+  - when the configured node stops, heartbeats and the outcome reach the owner that the worker polls;
+  - a self-fenced worker doesn't run work assigned to the session it abandoned.
 
 ## 13. Recovery and maintenance
 
@@ -898,7 +903,8 @@ Implements FR-23 and HLD §17 ([ADR-020](decisions/ADR-020-telemetry.md)).
 | `jobs_rejected_total{reason}` | API, for `POST /v1/jobs` refused with 413, 429 or 503; `reason` is the error code |
 | `jobs_scheduled_total{source=schedule}` | Materializer, per inserted fire |
 | `scheduling_lag_seconds` | Promoter, `ready_at − run_at` returned by each promotion |
-| `dispatch_latency_seconds` | Dispatcher, `attempt_started_at − ready_at` of each job delivered to a poll |
+| `dispatch_latency_seconds` | Dispatcher, for each job delivered to a poll: from the later of `ready_at` and the poll's arrival, to `attempt_started_at` ([ADR-022](decisions/ADR-022-dispatch-latency-from-a-free-worker.md)). It is computed as `min(attempt_started_at − ready_at, time since the poll arrived)`, so the database and engine clocks are never compared |
+| `queue_wait_seconds` | Dispatcher, `attempt_started_at − ready_at` of each job delivered to a poll, including waiting for a free worker |
 | `attempts_total`, `execution_duration_seconds`, `jobs_retried_total`, `jobs_dead_lettered_total` | `CompleteAttempt`: worker reports, the reaper and deregistration all pass through it |
 | `jobs_completed_total` | Every move to history: completion, cancel, expire, skip, supersede, bulk cancel |
 | `jobs_ready`, `jobs_held`, `jobs_oldest_ready_age_seconds`, `pool_backlog_target_seconds`, `jobs_running`, `worker_slots` | The pool's owner, sampled every 10 s. `jobs_ready` and the age cover dispatchable work only (§18.2) |
@@ -910,6 +916,8 @@ Implements FR-23 and HLD §17 ([ADR-020](decisions/ADR-020-telemetry.md)).
 | `db_clock_offset_seconds` | Engine: database `clock_timestamp()` against the local clock, adjusted for round trip, every 10 s |
 
 **Counting only committed work.** Metrics recorded inside a transaction are queued with `onCommit(tx, fn)` and run by `inTx` only after the commit succeeds.
+
+**Pool counters start at zero.** An engine creates `worker_sessions_expired_total`, `stale_completions_rejected_total` and `pool_owner_changes_total` at 0 for every pool it wants. These events are rare, and a series that first appears at 1 hides that event from `increase()`.
 
 **HTTP and RPC metrics:**
 
@@ -951,7 +959,7 @@ The API access log includes `trace_id` and `span_id` whenever the request has a 
   | Dashboard | Shows |
   |---|---|
   | Platform overview | SLO stats (scheduling lag and dispatch latency p99, API 5xx ratio, unowned pools), throughput, rejections, retries, backlog against target, held work, lag |
-  | Pools | Per pool: backlog and target, dispatchable and held work, slots, running work by tenant, latency, expiries, stale reports, owner |
+  | Pools | Per pool: backlog and target, dispatchable and held work, queue wait by priority, slots, running work by tenant, dispatch latency and scheduling lag, expiries, stale reports, owner |
   | Tenants | Per tenant: submissions by type and priority, future work, rejections, running jobs by pool |
   | Database and engines | Transaction time and rate by operation, connections, clock offset, pools per engine, owner changes, worker calls, runtime |
 
@@ -968,6 +976,7 @@ The API access log includes `trace_id` and `span_id` whenever the request has a 
   - the handler's spans, the engine's `Complete` span and its transaction share the execution span's trace;
   - polls and heartbeats produce no spans or RPC metrics;
   - dispatch latency, attempts and pool gauges are recorded;
+  - a job that waits for a busy worker shows the wait in `queue_wait_seconds`, but not in dispatch latency;
   - the API stores its server span as the job's `trace_parent`, and logs the caller's trace ID.
 - **Configuration:** OTLP and sampling variables are parsed and validated.
 - **Smoke test:** with the collector unreachable, the binary serves `/metrics` and exits within the flush timeout.
@@ -989,10 +998,14 @@ Implements [ADR-021](decisions/ADR-021-pool-backlog.md): one definition of a poo
 Every 10 s, the pool owner:
 
 1. **Reads one read-only snapshot** (repeatable read), so a job just claimed can't count as both `READY` and `RUNNING`:
-   - `READY` jobs not past their start deadline, grouped by priority and by hold. A job is held for `pool_paused`, `job_type_paused` (the claim's `notHeldSQL`) or `tenant_cap` (the tenants the dispatcher skips for their cap), in that order; otherwise it is dispatchable;
+   - `READY` jobs not past their start deadline, grouped by priority, tenant and hold: `pool_paused`, then `job_type_paused` (the claim's `notHeldSQL`);
    - `RUNNING` jobs per tenant, the active sessions' slots, and the pool's target.
-2. **Publishes the gauges.** `jobs_oldest_ready_age_seconds` is `now() − min(run_at)` over dispatchable jobs.
-3. **Records the backlog** on the pool row: `oldest_due_at` (the oldest dispatchable `run_at`, or `NULL`) and `sampled_at`. The upsert runs only while the owner's lease name, holder and epoch still match.
+2. **Applies tenant caps**, with the dispatcher's caps (refreshed every 10 s):
+   - A capped tenant may start `cap − running` more jobs, its allowance, as in the claim.
+   - If more of its unpaused jobs are waiting than that, the rest are held for `tenant_cap`. Its allowance counts as dispatchable, taken from its most urgent priorities, and none of its jobs set the backlog age: their wait comes from the cap.
+   - Otherwise all its unpaused jobs are dispatchable.
+3. **Publishes the gauges.** `jobs_oldest_ready_age_seconds` is `now() − min(run_at)` over dispatchable jobs of tenants that their cap doesn't hold back.
+4. **Records the backlog** on the pool row: `oldest_due_at` (the oldest such `run_at`, or `NULL`) and `sampled_at`. The upsert runs only while the owner's lease name, holder and epoch still match.
 
 ### 18.3 Ownership
 
@@ -1017,6 +1030,7 @@ Every 10 s, the pool owner:
 
 - **Store:**
   - held work is split by reason and left out of the oldest age;
+  - a capped tenant's allowance is dispatchable and the rest held, and none of its jobs set the age; with room under its cap, all its jobs count;
   - a paused pool holds everything;
   - the fenced write ignores a deposed owner, and stale samples are ignored;
   - wanted and unowned pools follow sessions and `READY` jobs;

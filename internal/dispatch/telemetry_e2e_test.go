@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -145,6 +146,57 @@ func TestJobIsTracedAcrossTheQueue(t *testing.T) {
 	if !strings.Contains(text, `rpc_method="jobscheduler.worker.v1.WorkerService/Complete"`) ||
 		strings.Contains(text, `WorkerService/Poll"`) || strings.Contains(text, `WorkerService/Heartbeat"`) {
 		t.Error("want RPC metrics for Complete and none for polls or heartbeats")
+	}
+}
+
+// A job that waits for a busy worker shows the wait in queue_wait_seconds, but its dispatch
+// latency (NFR-4) counts only from when the worker became free.
+func TestDispatchLatencyCountsFromAFreeWorker(t *testing.T) {
+	t.Parallel()
+	metrics, _ := telemetrytest.Install()
+	c := newCluster(t)
+	if _, err := c.store.CreateJobType(ctx, domain.JobType{TenantID: c.tenant, Name: "queued.job", Pool: "queued",
+		DefaultPriority: domain.PriorityNormal, AttemptTimeout: time.Minute, RetryPolicy: domain.DefaultRetryPolicy(),
+		Enabled: true}, postgres.Audit{Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	addr := c.engine("node-a")
+	before := telemetrytest.Scrape(t, metrics)
+	release := make(chan struct{})
+	var started atomic.Int32
+	c.run(func(ctx context.Context) error {
+		return workersdk.Run(ctx, workersdk.Config{Address: addr, Token: token, Pool: "queued", Slots: 1,
+			PollWait: time.Second, DrainTimeout: time.Second, Logger: slog.New(slog.DiscardHandler),
+			Handlers: map[string]workersdk.Handler{"queued.job": func(context.Context, workersdk.Job) ([]byte, error) {
+				if started.Add(1) == 1 {
+					<-release
+				}
+				return nil, nil
+			}}})
+	})
+	queued := func(nj *postgres.NewJob) { nj.Type, nj.Pool = "queued.job", "queued" }
+	first := c.submit(queued)
+	c.await(first, domain.StateRunning, 10*time.Second)
+	second := c.submit(queued) // waits for the only slot
+	time.Sleep(1200 * time.Millisecond)
+	close(release)
+	c.await(second, domain.StateSucceeded, 10*time.Second)
+
+	text := telemetrytest.Scrape(t, metrics)
+	delta := func(name string, labels map[string]string) float64 {
+		n, _ := telemetrytest.Value(text, name, labels)
+		prev, _ := telemetrytest.Value(before, name, labels)
+		return n - prev
+	}
+	pool, underOne := map[string]string{"pool": "queued"}, map[string]string{"pool": "queued", "le": "1"}
+	if n := delta("queue_wait_seconds_count", pool); n != 2 {
+		t.Fatalf("queue_wait_seconds_count rose by %v, want 2", n)
+	}
+	if n := delta("queue_wait_seconds_bucket", underOne); n > 1 {
+		t.Errorf("%v jobs waited in READY at most 1 s, want the second one's wait behind the busy slot counted", n)
+	}
+	if n := delta("dispatch_latency_seconds_bucket", underOne); n != 2 {
+		t.Errorf("%v of 2 jobs started within 1 s of a worker being free for them, want both", n)
 	}
 }
 

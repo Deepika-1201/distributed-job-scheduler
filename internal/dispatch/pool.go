@@ -18,6 +18,7 @@ var urgency = []domain.Priority{domain.PriorityCritical, domain.PriorityHigh, do
 type waiter struct {
 	session domain.WorkerSession
 	max     int
+	polled  time.Time // when the poll arrived: the worker has been free since
 	ready   chan struct{}
 
 	mu   sync.Mutex
@@ -80,7 +81,7 @@ func (p *pool) stop() { p.stopOnce.Do(p.cancel) }
 // wait queues a poll and blocks until jobs are delivered, the wait elapses, the pool stops or
 // the caller goes away. Jobs delivered to a caller that has gone are released.
 func (p *pool) wait(ctx context.Context, sess domain.WorkerSession, limit int, wait time.Duration) []domain.Job {
-	w := &waiter{session: sess, max: limit, ready: make(chan struct{})}
+	w := &waiter{session: sess, max: limit, polled: time.Now(), ready: make(chan struct{})}
 	p.mu.Lock()
 	if p.ctx.Err() != nil {
 		p.mu.Unlock()
@@ -203,7 +204,7 @@ func (p *pool) round() {
 		jobs, err := p.fill(lease, w, has, cs)
 		if len(jobs) > 0 {
 			if w.deliver(jobs) {
-				p.recordDispatch(jobs)
+				p.recordDispatch(jobs, w.polled)
 			} else {
 				p.release(jobs)
 			}

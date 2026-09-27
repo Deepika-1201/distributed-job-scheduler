@@ -23,26 +23,31 @@ func TestPoolGaugesSeparateHeldWork(t *testing.T) {
 	f.backdate(f.submit(f.newJob()).ID, 90*time.Second)
 	f.submit(f.newJob())
 	f.submit(f.newJob(func(nj *NewJob) { nj.Priority = domain.PriorityHigh }))
-	for range 2 { // older, but beta is at its running cap
+	for range 2 { // older, but beta may start only one more job
 		f.backdate(f.submit(f.newJob(func(nj *NewJob) { nj.TenantID = beta })).ID, 10*time.Minute)
 	}
 	f.backdate(f.submit(f.newJob(func(nj *NewJob) { nj.Type = "report.build" })).ID, 20*time.Minute)
 
-	g, err := f.store.SamplePoolGauges(ctx, "default", []domain.TenantID{beta})
+	g, err := f.store.SamplePoolGauges(ctx, "default", map[domain.TenantID]int{beta: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !mapsEqual(g.Ready, map[domain.Priority]int{domain.PriorityNormal: 2, domain.PriorityHigh: 1}) {
-		t.Errorf("Ready = %v, want the unheld jobs: two NORMAL and one HIGH", g.Ready)
+	if !mapsEqual(g.Ready, map[domain.Priority]int{domain.PriorityNormal: 3, domain.PriorityHigh: 1}) {
+		t.Errorf("Ready = %v, want acme's two NORMAL and one HIGH, plus the one job beta's cap allows", g.Ready)
 	}
-	if !mapsEqual(g.Held, map[string]int{HeldTenantCap: 2, HeldJobTypePaused: 1}) {
+	if !mapsEqual(g.Held, map[string]int{HeldTenantCap: 1, HeldJobTypePaused: 1}) {
 		t.Errorf("Held = %v", g.Held)
 	}
 	if g.OldestAge < 90*time.Second || g.OldestAge > 2*time.Minute || g.OldestDue.IsZero() {
-		t.Errorf("oldest dispatchable job due %v ago (%v), want about 90s: held jobs are older", g.OldestAge, g.OldestDue)
+		t.Errorf("oldest dispatchable job due %v ago (%v), want about 90s: a cap-limited tenant doesn't set the age", g.OldestAge, g.OldestDue)
 	}
 	if g.BacklogTarget != nil {
 		t.Errorf("BacklogTarget = %v, want the platform default", *g.BacklogTarget)
+	}
+	if g, err = f.store.SamplePoolGauges(ctx, "default", map[domain.TenantID]int{beta: 5}); err != nil ||
+		g.Held[HeldTenantCap] != 0 || g.Ready[domain.PriorityNormal] != 4 || g.OldestAge < 10*time.Minute {
+		t.Errorf("beta within its cap: Ready %v, Held %v, oldest %v (%v); want its jobs dispatchable and setting the age",
+			g.Ready, g.Held, g.OldestAge, err)
 	}
 
 	target := 10 * time.Minute

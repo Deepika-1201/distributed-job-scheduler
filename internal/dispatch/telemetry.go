@@ -71,6 +71,17 @@ func (d *Dispatcher) backlogTarget(g *postgres.PoolGauges) time.Duration {
 	return d.cfg.BacklogTarget
 }
 
+// initPoolCounters creates the pool-scoped counters at zero. A series that first appears
+// at 1 hides that increment from increase(), and these events are rare.
+func initPoolCounters(pools []string) {
+	for _, p := range pools {
+		attrs := metric.WithAttributes(attribute.String("pool", p))
+		observability.SessionsExpired.Add(context.Background(), 0, attrs)
+		observability.StaleCompletions.Add(context.Background(), 0, attrs)
+		observability.PoolOwnerChanges.Add(context.Background(), 0, attrs)
+	}
+}
+
 // sampleNode refreshes the node's gauges every MetricsInterval until ctx ends.
 func (d *Dispatcher) sampleNode(ctx context.Context) {
 	ticker := time.NewTicker(d.cfg.MetricsInterval)
@@ -113,11 +124,11 @@ func (p *pool) sampleGauges() {
 // sample reads the pool's gauges and records its dispatchable backlog, which api nodes shed
 // on (ADR-021). The backlog is recorded first, so admission never lags what metrics show.
 func (p *pool) sample() error {
-	cs, err := p.caps(p.ctx)
+	caps, err := p.d.tenantCaps(p.ctx)
 	if err != nil {
 		return err
 	}
-	g, err := p.d.store.SamplePoolGauges(p.ctx, p.name, cs.skip)
+	g, err := p.d.store.SamplePoolGauges(p.ctx, p.name, caps)
 	if err != nil {
 		return err
 	}
@@ -128,11 +139,16 @@ func (p *pool) sample() error {
 	return err
 }
 
-// recordDispatch measures READY to attempt start for jobs handed to a worker; both times
-// are on the database clock.
-func (p *pool) recordDispatch(jobs []domain.Job) {
+// recordDispatch measures jobs handed to a worker: how long each waited in READY, and how long
+// it waited once a worker was free for it (NFR-4), from the later of its ready time and the
+// poll's arrival. Ready and start times are on the database clock and the poll's wait on this
+// node's monotonic clock, so the two clocks are never compared.
+func (p *pool) recordDispatch(jobs []domain.Job, polled time.Time) {
+	free := time.Since(polled)
 	for _, j := range jobs {
-		observability.DispatchLatency.Record(context.Background(), max(0, j.Current.StartedAt.Sub(j.ReadyAt).Seconds()),
-			metric.WithAttributes(attribute.String("pool", p.name), attribute.String("priority", j.Priority.String())))
+		attrs := metric.WithAttributes(attribute.String("pool", p.name), attribute.String("priority", j.Priority.String()))
+		wait := max(0, j.Current.StartedAt.Sub(j.ReadyAt))
+		observability.QueueWait.Record(context.Background(), wait.Seconds(), attrs)
+		observability.DispatchLatency.Record(context.Background(), min(wait, free).Seconds(), attrs)
 	}
 }

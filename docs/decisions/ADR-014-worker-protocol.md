@@ -1,6 +1,6 @@
 # ADR-014: Worker protocol: unary calls, long-poll and owner redirects
 
-- **Status:** Accepted. Amends the worker-protocol row of [ADR-012](ADR-012-language-and-core-libraries.md). Resolves HLD open questions 7 and 8.
+- **Status:** Accepted. Amends the worker-protocol row of [ADR-012](ADR-012-language-and-core-libraries.md). Resolves HLD open questions 7 and 8. Amended by [ADR-023](ADR-023-session-calls-fall-back-to-the-owner.md) (session calls fall back to the owner).
 - **Date:** 2026-09-26
 - **Related:** [ADR-002](ADR-002-worker-pull-via-dispatcher.md), [ADR-006](ADR-006-leader-election.md), [HLD §12](../architecture.md#12-worker-architecture), [LLD §12.1](../low-level-design.md#121-protocol), [protocol definition](../../proto/jobscheduler/worker/v1/worker.proto)
 
@@ -56,6 +56,7 @@ Option A's drawbacks:
   - The worker polls the owner over a second connection.
   - If that fails, it goes back to its configured address with exponential backoff and jitter (0.5 s doubling to 10 s).
   - A redirect that arrives while the worker is already redirected also backs off, which stops two nodes with different views of the lease from bouncing a worker between them.
+  - *Amended by [ADR-023](ADR-023-session-calls-fall-back-to-the-owner.md): calls other than `Poll` go to the configured address, and are retried on the owner's connection when that address is unreachable.*
 - **Versioning:** package `jobscheduler.worker.v1`. Fields are only ever added; a breaking change becomes a `v2` package served alongside `v1`.
 - **Authentication:** a bearer token in call metadata, compared in constant time. Until phase 12 there is one token per cluster. Phase 12 adds per-pool tokens and TLS, as HLD §16 requires.
 
