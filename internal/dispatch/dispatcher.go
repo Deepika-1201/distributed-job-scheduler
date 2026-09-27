@@ -176,6 +176,16 @@ func (d *Dispatcher) Poll(ctx context.Context, req *workerpb.PollRequest) (*work
 	if err != nil {
 		return nil, d.toStatus(err)
 	}
+	if sess.Draining {
+		// Hold the call so a worker that hasn't seen the flag yet doesn't spin.
+		timer := time.NewTimer(max(0, min(req.Wait.AsDuration(), d.cfg.MaxPollWait)))
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+		}
+		return &workerpb.PollResponse{Drain: true}, nil
+	}
 	d.mu.Lock()
 	p := d.pools[sess.Pool]
 	d.mu.Unlock()
@@ -213,7 +223,7 @@ func (d *Dispatcher) Heartbeat(ctx context.Context, req *workerpb.HeartbeatReque
 	if err != nil {
 		return nil, d.toStatus(err)
 	}
-	resp := &workerpb.HeartbeatResponse{}
+	resp := &workerpb.HeartbeatResponse{Drain: res.Drain}
 	for _, id := range res.Cancel {
 		resp.Cancel = append(resp.Cancel, string(id))
 	}

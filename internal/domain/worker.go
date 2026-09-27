@@ -20,6 +20,7 @@ type WorkerSession struct {
 	Labels         map[string]string
 	RuntimeVersion string
 	State          SessionState
+	Draining       bool // gets no new assignments; the worker is told to drain
 	CreatedAt      time.Time
 	HeartbeatAt    time.Time
 	LeaseExpiresAt time.Time

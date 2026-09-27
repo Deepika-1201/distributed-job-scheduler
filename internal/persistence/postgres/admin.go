@@ -107,7 +107,7 @@ func (s *Store) RevokeAPIKey(ctx context.Context, tenantID domain.TenantID, id s
 }
 
 const jobTypeColumns = `tenant_id, name, version, pool, default_priority, attempt_timeout_ms, retry_policy,
-	at_most_once, enabled, created_at, updated_at`
+	at_most_once, enabled, paused, created_at, updated_at`
 
 func scanJobType(row pgx.Row) (domain.JobType, error) {
 	var (
@@ -118,7 +118,7 @@ func scanJobType(row pgx.Row) (domain.JobType, error) {
 		policy    retryPolicyJSON
 	)
 	err := row.Scan(&tenant, &jt.Name, &jt.Version, &jt.Pool, &priority, &timeoutMS, &policy,
-		&jt.AtMostOnce, &jt.Enabled, &jt.CreatedAt, &jt.UpdatedAt)
+		&jt.AtMostOnce, &jt.Enabled, &jt.Paused, &jt.CreatedAt, &jt.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.JobType{}, domain.ErrNotFound
 	}

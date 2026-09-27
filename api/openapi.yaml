@@ -38,6 +38,12 @@ paths:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/JobType" } } } }
         "404": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
+  /v1/job-types/{name}/pause:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post: { summary: Hold dispatch of a job type (operator); submissions and schedules continue, responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/JobType" } } } }, "404": { $ref: "#/components/responses/Error" } } }
+  /v1/job-types/{name}/resume:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post: { summary: Resume dispatch of a job type (operator), responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/JobType" } } } }, "404": { $ref: "#/components/responses/Error" } } }
 
   /v1/jobs:
     post:
@@ -138,6 +144,48 @@ paths:
   /v1/schedules/{id}/resume:
     parameters: [{ $ref: "#/components/parameters/ScheduleID" }]
     post: { summary: Resume a paused schedule (operator); missed fires follow the misfire policy, responses: { "200": { $ref: "#/components/responses/Schedule" }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Error" } } }
+  /v1/schedules/{id}/trigger:
+    parameters: [{ $ref: "#/components/parameters/ScheduleID" }]
+    post:
+      summary: Run a schedule once now (operator); the overlap policy applies, and the cursor and max_runs are unaffected
+      responses:
+        "201": { description: The job created for this run, content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/workers:
+    get:
+      summary: List active worker sessions (platform-admin)
+      parameters:
+        - { name: pool, in: query, schema: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/WorkerList" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/workers/{id}/drain:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+    post:
+      summary: Ask a worker to finish its running jobs and deregister (platform-admin)
+      responses:
+        "202": { description: The worker is told on its next heartbeat or poll }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/workers/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+    delete:
+      summary: Close a worker's session now (platform-admin); its running attempts are lost and retried
+      responses:
+        "204": { description: Deregistered }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/pools:
+    get:
+      summary: List pools with their owner, workers and backlog (platform-admin)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PoolList" } } } }
+  /v1/pools/{name}/pause:
+    parameters: [{ $ref: "#/components/parameters/PoolName" }]
+    post: { summary: Hold dispatch for a pool (platform-admin); jobs stay READY, responses: { "200": { $ref: "#/components/responses/Pool" } } }
+  /v1/pools/{name}/resume:
+    parameters: [{ $ref: "#/components/parameters/PoolName" }]
+    post: { summary: Resume dispatch for a pool (platform-admin), responses: { "200": { $ref: "#/components/responses/Pool" } } }
 
   /v1/operations:
     post:
@@ -175,6 +223,7 @@ components:
   parameters:
     JobID: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
     ScheduleID: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    PoolName: { name: name, in: path, required: true, schema: { type: string } }
   responses:
     Error:
       description: Error (see LLD §9.2 for codes)
@@ -185,6 +234,9 @@ components:
     Schedule:
       description: The schedule
       content: { application/json: { schema: { $ref: "#/components/schemas/Schedule" } } }
+    Pool:
+      description: The pool after the operation
+      content: { application/json: { schema: { $ref: "#/components/schemas/Pool" } } }
     Conflict:
       description: Not allowed from the job's current state (details.state holds it)
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
@@ -237,7 +289,8 @@ components:
         attempt_timeout: { $ref: "#/components/schemas/Duration" }
         retry_policy: { $ref: "#/components/schemas/RetryPolicy" }
         at_most_once: { type: boolean }
-        enabled: { type: boolean }
+        enabled: { type: boolean, description: false rejects submissions and holds schedules }
+        paused: { type: boolean, description: true holds dispatch; submissions and schedules continue }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     JobTypeList:
@@ -364,6 +417,44 @@ components:
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/Schedule" } }
         next_cursor: { type: string }
+    Worker:
+      type: object
+      properties:
+        id: { type: string, format: uuid, description: The session ID }
+        pool: { type: string }
+        worker_id: { type: string }
+        job_types: { type: array, items: { type: string }, description: Empty means every type in the pool }
+        slots: { type: integer }
+        running: { type: integer }
+        labels: { type: object, additionalProperties: { type: string } }
+        runtime_version: { type: string }
+        draining: { type: boolean }
+        created_at: { type: string, format: date-time }
+        heartbeat_at: { type: string, format: date-time }
+        lease_expires_at: { type: string, format: date-time }
+    WorkerList:
+      type: object
+      properties: { items: { type: array, items: { $ref: "#/components/schemas/Worker" } } }
+    Pool:
+      type: object
+      properties:
+        name: { type: string }
+        paused: { type: boolean }
+        owner:
+          type: [object, "null"]
+          description: The engine node holding the pool's lease, if any
+          properties:
+            node_id: { type: string }
+            address: { type: string }
+            epoch: { type: integer }
+            lease_expires_at: { type: string, format: date-time }
+        workers: { type: integer }
+        slots: { type: integer }
+        ready_jobs: { type: integer }
+        running_jobs: { type: integer }
+    PoolList:
+      type: object
+      properties: { items: { type: array, items: { $ref: "#/components/schemas/Pool" } } }
     OperationFilter:
       type: object
       properties:
@@ -398,7 +489,7 @@ components:
       required: [name, role]
       properties:
         name: { type: string, maxLength: 100 }
-        role: { type: string, enum: [viewer, submitter, operator, admin] }
+        role: { type: string, enum: [viewer, submitter, operator, admin, platform-admin], description: "At most the caller's own role" }
         expires_at: { type: string, format: date-time }
     APIKey:
       type: object

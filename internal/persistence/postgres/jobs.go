@@ -235,16 +235,21 @@ type ClaimRequest struct {
 	Allowances map[domain.TenantID]int
 }
 
+// notHeldSQL excludes jobs of paused job types; it expects the jobs table unaliased (ADR-017).
+const notHeldSQL = `NOT EXISTS (SELECT 1 FROM job_types t WHERE t.tenant_id = jobs.tenant_id AND t.name = jobs.job_type AND t.paused)`
+
 // claimSQL over-fetches candidates when allowances apply, then keeps at most each capped
 // tenant's allowance. Candidates locked but not picked are released at commit.
 var claimSQL = `
 WITH candidates AS MATERIALIZED (
     SELECT id, tenant_id, run_at FROM jobs
     WHERE EXISTS (` + fenceSQL("$6", "$7", "$8") + `)
+      AND NOT EXISTS (SELECT 1 FROM pools WHERE name = $1 AND paused)
       AND state = 'READY' AND pool = $1 AND priority = $2
       AND NOT (tenant_id = ANY ($3::uuid[]))
       AND ($9::text[] IS NULL OR job_type = ANY ($9::text[]))
       AND (start_deadline IS NULL OR start_deadline > now() OR attempt_count > 0)
+      AND ` + notHeldSQL + `
     ORDER BY run_at, id
     LIMIT $10
     FOR UPDATE SKIP LOCKED

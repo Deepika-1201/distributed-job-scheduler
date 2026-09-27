@@ -16,7 +16,8 @@ type JobType struct {
 	AttemptTimeout  time.Duration
 	RetryPolicy     RetryPolicy
 	AtMostOnce      bool
-	Enabled         bool
+	Enabled         bool // false rejects submissions and holds schedules
+	Paused          bool // true holds dispatch; submissions and schedules continue
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
@@ -29,15 +30,17 @@ const (
 	RoleSubmitter Role = "submitter"
 	RoleOperator  Role = "operator"
 	RoleAdmin     Role = "admin"
+	// RolePlatformAdmin manages shared platform resources: pools, workers and quotas (ADR-017).
+	RolePlatformAdmin Role = "platform-admin"
 )
 
-var roleOrder = []Role{RoleViewer, RoleSubmitter, RoleOperator, RoleAdmin}
+var roleOrder = []Role{RoleViewer, RoleSubmitter, RoleOperator, RoleAdmin, RolePlatformAdmin}
 
 func ParseRole(s string) (Role, error) {
 	if r := Role(s); slices.Contains(roleOrder, r) {
 		return r, nil
 	}
-	return "", fmt.Errorf("unknown role %q (want viewer, submitter, operator or admin)", s)
+	return "", fmt.Errorf("unknown role %q (want viewer, submitter, operator, admin or platform-admin)", s)
 }
 
 // Includes reports whether r grants at least the permissions of min.

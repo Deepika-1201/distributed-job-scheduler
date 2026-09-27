@@ -29,6 +29,7 @@ type jobTypeResponse struct {
 	RetryPolicy     *retryPolicyBody `json:"retry_policy"`
 	AtMostOnce      bool             `json:"at_most_once"`
 	Enabled         bool             `json:"enabled"`
+	Paused          bool             `json:"paused"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
 }
@@ -37,7 +38,7 @@ func toJobTypeResponse(jt domain.JobType) jobTypeResponse {
 	return jobTypeResponse{
 		Name: jt.Name, Version: jt.Version, Pool: jt.Pool, DefaultPriority: jt.DefaultPriority,
 		AttemptTimeout: jt.AttemptTimeout.String(), RetryPolicy: policyBody(jt.RetryPolicy),
-		AtMostOnce: jt.AtMostOnce, Enabled: jt.Enabled, CreatedAt: jt.CreatedAt, UpdatedAt: jt.UpdatedAt,
+		AtMostOnce: jt.AtMostOnce, Enabled: jt.Enabled, Paused: jt.Paused, CreatedAt: jt.CreatedAt, UpdatedAt: jt.UpdatedAt,
 	}
 }
 
@@ -169,7 +170,7 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request, p principa
 	}
 	role, err := domain.ParseRole(req.Role)
 	if err != nil {
-		fe.add("role", "must be viewer, submitter, operator or admin")
+		fe.add("role", "must be viewer, submitter, operator, admin or platform-admin")
 	}
 	var expires time.Time
 	if req.ExpiresAt != nil {
@@ -179,6 +180,9 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request, p principa
 	}
 	if err := fe.err(); err != nil {
 		return err
+	}
+	if !p.Role.Includes(role) {
+		return errPermission("a key cannot grant more than its own role (%s)", p.Role)
 	}
 	plaintext, key := NewAPIKey(p.Tenant, req.Name, role, expires)
 	audit := s.audit(r, p)

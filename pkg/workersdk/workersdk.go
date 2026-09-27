@@ -15,6 +15,7 @@ import (
 	"os"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -84,6 +85,9 @@ var (
 	errShutdown        = errors.New("worker shutting down")
 )
 
+// ErrDrained is returned by Run after an operator drained the worker (ADR-017).
+var ErrDrained = errors.New("workersdk: worker drained by an operator")
+
 const (
 	completeTimeout = 10 * time.Minute
 	reportGrace     = 10 * time.Second
@@ -92,9 +96,9 @@ const (
 	maxBackoff      = 10 * time.Second
 )
 
-// Run registers the worker and processes jobs until ctx is cancelled. Then it stops polling,
-// waits up to DrainTimeout for running handlers, reports the rest as retryable failures and
-// deregisters.
+// Run registers the worker and processes jobs until ctx is cancelled or an operator drains
+// it. Then it stops polling, waits up to DrainTimeout for running handlers, reports the rest
+// as retryable failures and deregisters. After a drain it returns ErrDrained.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.Address == "" || cfg.Token == "" || cfg.Pool == "" || len(cfg.Handlers) == 0 {
 		return errors.New("workersdk: address, token, pool and at least one handler are required")
@@ -136,20 +140,28 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	var loops sync.WaitGroup
 	loops.Go(func() { w.heartbeats(work) })
-	w.poll(ctx)
+	pollCtx, stopPolling := context.WithCancel(ctx)
+	defer stopPolling()
+	w.stopPolling = stopPolling
+	w.poll(pollCtx)
 
 	w.drain()
 	stopWork()
 	loops.Wait()
 	w.deregister()
+	if w.drained.Load() {
+		return ErrDrained
+	}
 	return nil
 }
 
 type worker struct {
-	cfg     Config
-	log     *slog.Logger
-	client  workerpb.WorkerServiceClient
-	reports context.Context // ends when Run returns; bounds outcome retries
+	cfg         Config
+	log         *slog.Logger
+	client      workerpb.WorkerServiceClient
+	reports     context.Context // ends when Run returns; bounds outcome retries
+	stopPolling context.CancelFunc
+	drained     atomic.Bool
 
 	pollMu     sync.Mutex
 	pollConn   *grpc.ClientConn // set while polling a redirect target
@@ -238,6 +250,14 @@ func (w *worker) sessionInfo() (string, int) {
 	return w.session, w.generation
 }
 
+// requestDrain stops polling; Run then drains running work and deregisters.
+func (w *worker) requestDrain() {
+	if w.drained.CompareAndSwap(false, true) {
+		w.log.Info("drain requested by the engine")
+		w.stopPolling()
+	}
+}
+
 func (w *worker) free() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -276,6 +296,9 @@ func (w *worker) poll(ctx context.Context) {
 			}
 			backoff = min(2*backoff, maxBackoff)
 			continue
+		case resp.Drain:
+			w.requestDrain()
+			return
 		case resp.RedirectAddress != "":
 			if redirected && !sleep(ctx, jitter(backoff)) { // redirected again: views of the owner disagree
 				return
@@ -479,6 +502,9 @@ func (w *worker) heartbeats(ctx context.Context) {
 				w.renewSession(ctx, generation) // self-fence: the engine may already have retried our jobs
 			}
 		default:
+			if resp.Drain {
+				w.requestDrain()
+			}
 			w.mu.Lock()
 			w.lastBeat = time.Now()
 			for _, id := range resp.Cancel {

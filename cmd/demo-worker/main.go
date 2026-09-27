@@ -64,6 +64,10 @@ func main() {
 			},
 		},
 	})
+	if errors.Is(err, workersdk.ErrDrained) {
+		log.Info("worker drained by an operator")
+		return
+	}
 	if err != nil {
 		log.Error("worker stopped", "error", err)
 		os.Exit(1)

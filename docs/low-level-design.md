@@ -393,8 +393,8 @@ The body is always `{"error": {"code", "message", "request_id", "details"}}`. In
 
 - **Key format:** `jsk_<prefix>_<secret>`, where the prefix is 8 random characters and the secret is 32 random bytes. The database stores the prefix and a SHA-256 hash of the whole key, and the key is shown once at creation.
 - **Verification:** look up by prefix, then compare hashes in constant time. A successful check is cached in-process for 30 s, so a revoked key stops working within 30 s.
-- **Roles** are hierarchical: `viewer` < `submitter` < `operator` < `admin`. Each key has one role and belongs to one tenant, and the tenant comes only from the key.
-- **Bootstrap:** `jobscheduler bootstrap <tenant>` creates a tenant and an admin key.
+- **Roles** are hierarchical: `viewer` < `submitter` < `operator` < `admin` < `platform-admin`. Each key has one role and belongs to one tenant, and the tenant comes only from the key. A key can create keys up to its own role. `platform-admin` keys live in a dedicated platform tenant ([ADR-017](decisions/ADR-017-platform-administration.md)).
+- **Bootstrap:** `jobscheduler bootstrap <tenant> [admin|platform-admin]` creates a tenant and its first key.
 
 | Method | Path | Minimum role |
 |---|---|---|
@@ -403,6 +403,7 @@ The body is always `{"error": {"code", "message", "request_id", "details"}}`. In
 | `POST` | `/v1/jobs/{id}/pause`, `/resume`, `/run`, `/retry` | operator |
 | `POST` / `PATCH` | `/v1/job-types`, `/v1/job-types/{name}` | admin |
 | `POST` / `DELETE` | `/v1/api-keys`, `/v1/api-keys/{id}` | admin |
+| any | `/v1/workers`, `/v1/pools` and their actions | platform-admin (§14) |
 
 ### 9.4 Submitting a job
 
@@ -745,3 +746,54 @@ A singleton duty under lease `singleton:maintenance` (§11.3). It runs when the 
   - bulk cancel and re-drive process batches, respect their filters and resume from the cursor.
 - **Reaper:** warm-up delays expiry and restarts after a failed ping.
 - **End to end:** a worker that stops heartbeating without deregistering has its job lost, retried and completed by another worker.
+
+## 14. Platform administration
+
+Implements FR-10 (trigger) and FR-21 ([ADR-017](decisions/ADR-017-platform-administration.md)).
+
+### 14.1 Schema (phase 12 migration, part 1)
+
+- `api_keys.role` also accepts `platform-admin`.
+- `job_types.paused boolean` and `worker_sessions.draining boolean`, both defaulting to `false`.
+- `pools (name PK, paused, updated_at)`. A row is created the first time a pool is paused.
+
+### 14.2 Endpoints
+
+| Endpoint | Role | Effect |
+|---|---|---|
+| `GET /v1/workers?pool=` | platform-admin | Active sessions with their running attempt counts |
+| `POST /v1/workers/{id}/drain` | platform-admin | `draining = true`; `404` for a session that isn't active |
+| `DELETE /v1/workers/{id}` | platform-admin | Closes the session; its held attempts become `LOST` and are retried |
+| `GET /v1/pools` | platform-admin | Every pool known from job types, sessions or `pools`, with its state (see below) |
+| `POST /v1/pools/{name}/pause`, `/resume` | platform-admin | Sets `pools.paused`; idempotent |
+| `POST /v1/job-types/{name}/pause`, `/resume` | operator | Sets `job_types.paused` for the caller's tenant; idempotent |
+| `POST /v1/schedules/{id}/trigger` | operator | `201` with the created job |
+
+**Pool state** returned by `GET /v1/pools`:
+
+- whether it is paused;
+- its owner, from the pool lease: node, address and epoch;
+- its active workers and their total slots;
+- its `READY` and `RUNNING` job counts.
+
+**Access and audit:**
+
+- Only a platform-admin can create a `platform-admin` key. Other callers get `403`.
+- Every mutation above writes an audit row: `pool.pause`, `pool.resume`, `worker.drain`, `worker.deregister`, `job_type.pause`, `job_type.resume` and `schedule.trigger`.
+
+### 14.3 Behavior
+
+- **Holds:** the claim statement and `ReadyPriorities` skip jobs of a paused pool or paused job type. A held job stays `READY`, and its start deadline still applies.
+- **Drain:** `Heartbeat` and `Poll` responses carry `drain`.
+  - A draining session's poll waits out its wait time and returns no assignments, so a worker that hasn't seen the flag yet can't spin.
+  - On `drain`, the SDK stops polling, finishes running handlers within `DrainTimeout`, deregisters, and `Run` returns `ErrDrained`.
+- **Trigger:**
+  - Locks the schedule, whose job type must be enabled (else `409`), then inserts one fire at `now()` through the ledger, with `created_by` set to the caller.
+  - The job is `SCHEDULED` and due, so the promoter applies the overlap policy.
+  - A paused or completed schedule can be triggered. `fire_count` and the cursor are unchanged.
+
+### 14.4 Tests
+
+- **Store:** pool and job-type holds block claims until resumed; drain reaches heartbeats; draining sessions get no assignments; trigger creates a due job.
+- **API:** role enforcement (tenant admin → `403`); a platform-admin mints a platform-admin key but a tenant admin cannot; pool and worker listings; job-type pause.
+- **End to end:** a drained SDK worker finishes its running job, deregisters, and `Run` returns `ErrDrained`.

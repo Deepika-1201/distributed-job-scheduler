@@ -13,16 +13,16 @@ import (
 )
 
 const sessionColumns = `id, pool, worker_id, job_types, slots, labels, runtime_version, state, created_at,
-	heartbeat_at, lease_expires_at`
+	heartbeat_at, lease_expires_at, draining`
 
-func scanSession(row pgx.Row) (domain.WorkerSession, error) {
+func scanSession(row pgx.Row, extra ...any) (domain.WorkerSession, error) {
 	var (
 		s     domain.WorkerSession
 		id    pgtype.UUID
 		state string
 	)
-	err := row.Scan(&id, &s.Pool, &s.WorkerID, &s.JobTypes, &s.Slots, &s.Labels, &s.RuntimeVersion, &state,
-		&s.CreatedAt, &s.HeartbeatAt, &s.LeaseExpiresAt)
+	err := row.Scan(append([]any{&id, &s.Pool, &s.WorkerID, &s.JobTypes, &s.Slots, &s.Labels, &s.RuntimeVersion, &state,
+		&s.CreatedAt, &s.HeartbeatAt, &s.LeaseExpiresAt, &s.Draining}, extra...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.WorkerSession{}, domain.ErrNotFound
 	}
@@ -66,6 +66,7 @@ type AttemptRef struct {
 type HeartbeatResult struct {
 	Cancel []domain.AttemptID // the job was cancelled
 	Stale  []domain.AttemptID // no longer the job's current attempt
+	Drain  bool               // an operator asked the worker to drain
 }
 
 // unreportedGrace is how long an attempt may be missing from its session's heartbeats before
@@ -82,14 +83,15 @@ func (s *Store) Heartbeat(ctx context.Context, id domain.SessionID, held []Attem
 	jobIDs, attemptIDs := refArrays(held)
 	var res HeartbeatResult
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `
+		err := tx.QueryRow(ctx, `
 			UPDATE worker_sessions SET heartbeat_at = now(), lease_expires_at = now() + make_interval(secs => $2)
-			WHERE id = $1 AND state = 'ACTIVE'`, sid, ttl.Seconds())
+			WHERE id = $1 AND state = 'ACTIVE'
+			RETURNING draining`, sid, ttl.Seconds()).Scan(&res.Drain)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.ErrNotFound
+		}
 		if err != nil {
 			return err
-		}
-		if tag.RowsAffected() == 0 {
-			return domain.ErrNotFound
 		}
 		if res.Stale, err = collectAttemptIDs(tx.Query(ctx, `
 			SELECT r.attempt_id FROM unnest($1::uuid[], $2::uuid[]) AS r (job_id, attempt_id)
@@ -145,8 +147,10 @@ func (s *Store) ActivePools(ctx context.Context) ([]string, error) {
 func (s *Store) ReadyPriorities(ctx context.Context, pool string) (map[domain.Priority]bool, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT p FROM unnest('{1,2,3,4}'::smallint[]) AS p
-		WHERE EXISTS (SELECT 1 FROM jobs WHERE state = 'READY' AND pool = $1 AND priority = p
-		    AND (start_deadline IS NULL OR start_deadline > now() OR attempt_count > 0))`, pool)
+		WHERE NOT EXISTS (SELECT 1 FROM pools WHERE name = $1 AND paused)
+		  AND EXISTS (SELECT 1 FROM jobs WHERE state = 'READY' AND pool = $1 AND priority = p
+		    AND (start_deadline IS NULL OR start_deadline > now() OR attempt_count > 0)
+		    AND `+notHeldSQL+`)`, pool)
 	if err != nil {
 		return nil, err
 	}

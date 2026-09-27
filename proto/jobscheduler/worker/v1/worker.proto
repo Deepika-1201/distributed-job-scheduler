@@ -54,6 +54,8 @@ message PollResponse {
   string redirect_address = 2;
   // The pool has no owner yet; poll again after this delay.
   google.protobuf.Duration retry_after = 3;
+  // An operator asked this worker to drain: stop polling, finish running jobs, deregister.
+  bool drain = 4;
 }
 
 message Assignment {
@@ -93,6 +95,8 @@ message HeartbeatResponse {
   repeated string cancel = 1;
   // Attempts that are no longer current: stop them and drop their results.
   repeated string stale = 2;
+  // An operator asked this worker to drain: stop polling, finish running jobs, deregister.
+  bool drain = 3;
 }
 
 enum Outcome {

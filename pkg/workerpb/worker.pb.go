@@ -294,7 +294,9 @@ type PollResponse struct {
 	// Poll the pool owner at this address instead.
 	RedirectAddress string `protobuf:"bytes,2,opt,name=redirect_address,json=redirectAddress,proto3" json:"redirect_address,omitempty"`
 	// The pool has no owner yet; poll again after this delay.
-	RetryAfter    *durationpb.Duration `protobuf:"bytes,3,opt,name=retry_after,json=retryAfter,proto3" json:"retry_after,omitempty"`
+	RetryAfter *durationpb.Duration `protobuf:"bytes,3,opt,name=retry_after,json=retryAfter,proto3" json:"retry_after,omitempty"`
+	// An operator asked this worker to drain: stop polling, finish running jobs, deregister.
+	Drain         bool `protobuf:"varint,4,opt,name=drain,proto3" json:"drain,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -348,6 +350,13 @@ func (x *PollResponse) GetRetryAfter() *durationpb.Duration {
 		return x.RetryAfter
 	}
 	return nil
+}
+
+func (x *PollResponse) GetDrain() bool {
+	if x != nil {
+		return x.Drain
+	}
+	return false
 }
 
 type Assignment struct {
@@ -612,7 +621,9 @@ type HeartbeatResponse struct {
 	// Attempts whose job was cancelled: cancel the handler and report OUTCOME_CANCELLED.
 	Cancel []string `protobuf:"bytes,1,rep,name=cancel,proto3" json:"cancel,omitempty"`
 	// Attempts that are no longer current: stop them and drop their results.
-	Stale         []string `protobuf:"bytes,2,rep,name=stale,proto3" json:"stale,omitempty"`
+	Stale []string `protobuf:"bytes,2,rep,name=stale,proto3" json:"stale,omitempty"`
+	// An operator asked this worker to drain: stop polling, finish running jobs, deregister.
+	Drain         bool `protobuf:"varint,3,opt,name=drain,proto3" json:"drain,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -659,6 +670,13 @@ func (x *HeartbeatResponse) GetStale() []string {
 		return x.Stale
 	}
 	return nil
+}
+
+func (x *HeartbeatResponse) GetDrain() bool {
+	if x != nil {
+		return x.Drain
+	}
+	return false
 }
 
 type CompleteRequest struct {
@@ -930,12 +948,13 @@ const file_jobscheduler_worker_v1_worker_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
 	"\bmax_jobs\x18\x02 \x01(\x05R\amaxJobs\x12-\n" +
-	"\x04wait\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x04wait\"\xbb\x01\n" +
+	"\x04wait\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x04wait\"\xd1\x01\n" +
 	"\fPollResponse\x12D\n" +
 	"\vassignments\x18\x01 \x03(\v2\".jobscheduler.worker.v1.AssignmentR\vassignments\x12)\n" +
 	"\x10redirect_address\x18\x02 \x01(\tR\x0fredirectAddress\x12:\n" +
 	"\vretry_after\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\n" +
-	"retryAfter\"\xcb\x04\n" +
+	"retryAfter\x12\x14\n" +
+	"\x05drain\x18\x04 \x01(\bR\x05drain\"\xcb\x04\n" +
 	"\n" +
 	"Assignment\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1d\n" +
@@ -965,10 +984,11 @@ const file_jobscheduler_worker_v1_worker_proto_rawDesc = "" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x02 \x01(\tR\tattemptId\x12%\n" +
-	"\x0eattempt_number\x18\x03 \x01(\x03R\rattemptNumber\"A\n" +
+	"\x0eattempt_number\x18\x03 \x01(\x03R\rattemptNumber\"W\n" +
 	"\x11HeartbeatResponse\x12\x16\n" +
 	"\x06cancel\x18\x01 \x03(\tR\x06cancel\x12\x14\n" +
-	"\x05stale\x18\x02 \x03(\tR\x05stale\"\xd0\x02\n" +
+	"\x05stale\x18\x02 \x03(\tR\x05stale\x12\x14\n" +
+	"\x05drain\x18\x03 \x01(\bR\x05drain\"\xd0\x02\n" +
 	"\x0fCompleteRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +

@@ -55,6 +55,8 @@ func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
 	s.handle("GET /v1/job-types", domain.RoleViewer, s.listJobTypes)
 	s.handle("GET /v1/job-types/{name}", domain.RoleViewer, s.getJobType)
 	s.handle("PATCH /v1/job-types/{name}", domain.RoleAdmin, s.patchJobType)
+	s.handle("POST /v1/job-types/{name}/pause", domain.RoleOperator, s.jobTypeAction(true))
+	s.handle("POST /v1/job-types/{name}/resume", domain.RoleOperator, s.jobTypeAction(false))
 
 	s.handle("POST /v1/jobs", domain.RoleSubmitter, s.submitJob)
 	s.handle("GET /v1/jobs", domain.RoleViewer, s.listJobs)
@@ -73,6 +75,14 @@ func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
 	s.handle("DELETE /v1/schedules/{id}", domain.RoleOperator, s.deleteSchedule)
 	s.handle("POST /v1/schedules/{id}/pause", domain.RoleOperator, s.scheduleAction(store.PauseSchedule))
 	s.handle("POST /v1/schedules/{id}/resume", domain.RoleOperator, s.scheduleAction(store.ResumeSchedule))
+	s.handle("POST /v1/schedules/{id}/trigger", domain.RoleOperator, s.triggerSchedule)
+
+	s.handle("GET /v1/workers", domain.RolePlatformAdmin, s.listWorkers)
+	s.handle("POST /v1/workers/{id}/drain", domain.RolePlatformAdmin, s.drainWorker)
+	s.handle("DELETE /v1/workers/{id}", domain.RolePlatformAdmin, s.deregisterWorker)
+	s.handle("GET /v1/pools", domain.RolePlatformAdmin, s.listPools)
+	s.handle("POST /v1/pools/{name}/pause", domain.RolePlatformAdmin, s.poolAction(true))
+	s.handle("POST /v1/pools/{name}/resume", domain.RolePlatformAdmin, s.poolAction(false))
 
 	s.handle("POST /v1/operations", domain.RoleOperator, s.createOperation)
 	s.handle("GET /v1/operations/{id}", domain.RoleViewer, s.getOperation)

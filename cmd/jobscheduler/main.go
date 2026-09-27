@@ -44,11 +44,15 @@ func main() {
 	case "migrate":
 		err = migrate()
 	case "bootstrap":
-		if len(os.Args) != 3 {
-			err = fmt.Errorf("usage: jobscheduler bootstrap <tenant-name>")
+		role := domain.RoleAdmin
+		if len(os.Args) == 4 {
+			role = domain.Role(os.Args[3])
+		}
+		if (len(os.Args) != 3 && len(os.Args) != 4) || (role != domain.RoleAdmin && role != domain.RolePlatformAdmin) {
+			err = fmt.Errorf("usage: jobscheduler bootstrap <tenant-name> [admin|platform-admin]")
 			break
 		}
-		err = bootstrap(os.Args[2])
+		err = bootstrap(os.Args[2], role)
 	default:
 		err = fmt.Errorf("unknown command %q (usage: jobscheduler [serve|migrate|bootstrap])", command)
 	}
@@ -168,7 +172,7 @@ func migrate() error {
 }
 
 // bootstrap creates a tenant and prints its first admin API key, which is shown only once.
-func bootstrap(tenantName string) error {
+func bootstrap(tenantName string, role domain.Role) error {
 	cfg, _, err := setup()
 	if err != nil {
 		return err
@@ -185,9 +189,9 @@ func bootstrap(tenantName string) error {
 	if err != nil {
 		return fmt.Errorf("create tenant %q: %w", tenantName, err)
 	}
-	plaintext, key := api.NewAPIKey(tenant, "bootstrap admin", domain.RoleAdmin, time.Time{})
+	plaintext, key := api.NewAPIKey(tenant, "bootstrap "+string(role), role, time.Time{})
 	if _, err := store.CreateAPIKey(ctx, key, nil); err != nil {
-		return fmt.Errorf("create admin key: %w", err)
+		return fmt.Errorf("create %s key: %w", role, err)
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]string{"tenant_id": string(tenant), "api_key": plaintext})
 }
