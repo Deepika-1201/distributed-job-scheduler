@@ -683,6 +683,7 @@ Every engine node runs the gRPC server, plus a pool lease manager (§11.3).
 - **Deadlines:** the attempt timeout is enforced locally on the monotonic clock, starting when the assignment is received.
 - **Completions** retry with backoff until accepted, rejected as stale, or 10 minutes pass.
 - **Self-fencing:** if no heartbeat succeeds for `lease TTL − 5 s` (25 s), the worker cancels every handler, drops their results and re-registers.
+- **One renewal at a time:** when the poll loop and the heartbeat loop both find the session gone, one re-registers. The other waits for it only until its own context ends, so shutdown never waits on re-registration against an engine that is down.
 - **Drain** (context cancelled):
   1. Stop polling.
   2. Wait up to `DrainTimeout` (30 s) for running handlers.
@@ -694,6 +695,7 @@ Every engine node runs the gRPC server, plus a pool lease manager (§11.3).
 - Store: sessions, typed claims, exact tenant caps, release.
 - Dispatcher: per-slot weighted allocation.
 - End to end: an in-process engine and SDK workers over real gRPC. Covers success, retry then success, permanent failure, cancellation delivered through heartbeats, timeout, and a worker redirected from a non-owner engine to the owner.
+- SDK: against a fake engine that has become unreachable, `Run` still returns promptly once cancelled while the heartbeat loop keeps retrying re-registration.
 
 ## 13. Recovery and maintenance
 

@@ -3,6 +3,7 @@ package dispatch_test
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,6 +42,22 @@ func TestCrashedWorkersJobIsRetriedElsewhere(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Heartbeat until the job arrives: under load that can take longer than the 1 s session.
+	alive := make(chan struct{})
+	stopHeartbeats := sync.OnceFunc(func() { close(alive) })
+	defer stopHeartbeats()
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-alive:
+				return
+			case <-ticker.C:
+				_, _ = crashed.Heartbeat(callCtx, &workerpb.HeartbeatRequest{SessionId: reg.SessionId})
+			}
+		}
+	}()
 	var got *workerpb.PollResponse
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
 		if got, err = crashed.Poll(callCtx, &workerpb.PollRequest{SessionId: reg.SessionId, MaxJobs: 1,
@@ -54,7 +71,7 @@ func TestCrashedWorkersJobIsRetriedElsewhere(t *testing.T) {
 	if got == nil || len(got.Assignments) != 1 || got.Assignments[0].JobId != string(id) {
 		t.Fatalf("the crashing worker never got the job: %v", got)
 	}
-	// It now goes silent: no heartbeats, no completion, no deregistration.
+	stopHeartbeats() // it now goes silent: no heartbeats, no completion, no deregistration
 
 	c.worker(addr, 1, map[string]workersdk.Handler{
 		"email.send": func(context.Context, workersdk.Job) ([]byte, error) { return []byte(`{"ok": true}`), nil },

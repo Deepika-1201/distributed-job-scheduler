@@ -176,7 +176,7 @@ type worker struct {
 	pollClient workerpb.WorkerServiceClient
 
 	mu         sync.Mutex
-	renewMu    sync.Mutex // serializes re-registration
+	renewing   chan struct{} // closed when the renewal in progress ends; nil when none
 	session    string
 	generation int
 	ttl        time.Duration
@@ -237,15 +237,25 @@ func (w *worker) register(ctx context.Context) error {
 }
 
 // renewSession replaces a session the engine no longer knows, unless another goroutine has
-// already done so. Attempts of the old session are abandoned: the engine retries them.
+// already done so. Attempts of the old session are abandoned: the engine retries them. A
+// caller that finds a renewal in progress waits for it, or until its own ctx ends: the
+// heartbeat loop may be re-registering with a context that outlives polling.
 func (w *worker) renewSession(ctx context.Context, generation int) {
-	w.renewMu.Lock()
-	defer w.renewMu.Unlock()
 	w.mu.Lock()
 	if w.generation != generation {
 		w.mu.Unlock()
 		return
 	}
+	if inProgress := w.renewing; inProgress != nil {
+		w.mu.Unlock()
+		select {
+		case <-inProgress:
+		case <-ctx.Done():
+		}
+		return
+	}
+	done := make(chan struct{})
+	w.renewing = done
 	for id, a := range w.running {
 		a.cancel(errStale)
 		delete(w.running, id)
@@ -254,6 +264,10 @@ func (w *worker) renewSession(ctx context.Context, generation int) {
 	w.mu.Unlock()
 	w.log.Warn("session lost; abandoning running attempts and registering again")
 	_ = w.register(ctx)
+	w.mu.Lock()
+	w.renewing = nil
+	w.mu.Unlock()
+	close(done)
 }
 
 func (w *worker) sessionInfo() (string, int) {
