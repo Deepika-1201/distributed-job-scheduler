@@ -120,7 +120,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		cfg.Engine = Engine{
 			WorkerAddr:       p.str("JS_WORKER_ADDR", ":7070"),
 			AdvertiseAddr:    p.str("JS_WORKER_ADVERTISE_ADDR", ""),
-			WorkerToken:      p.required("JS_WORKER_TOKEN"),
+			WorkerToken:      p.str("JS_WORKER_TOKEN", ""),
 			NodeID:           p.str("JS_NODE_ID", defaultNodeID()),
 			HistoryRetention: p.duration("JS_HISTORY_RETENTION", 30*24*time.Hour),
 		}

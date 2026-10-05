@@ -195,6 +195,27 @@ paths:
       summary: Replace a pool's settings (platform-admin); null means the platform default
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PoolSettings" } } } }
       responses: { "200": { $ref: "#/components/responses/Pool" } }
+  /v1/pools/{name}/worker-tokens:
+    parameters: [{ $ref: "#/components/parameters/PoolName" }]
+    post:
+      summary: Issue a token that lets workers serve only this pool (platform-admin); the token is returned only once (ADR-025)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/WorkerTokenRequest" } } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/WorkerToken" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+    get:
+      summary: List the pool's worker tokens, including revoked and expired ones (platform-admin)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/WorkerTokenList" } } } }
+  /v1/pools/{name}/worker-tokens/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/PoolName" }
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      summary: Revoke a worker token (platform-admin); engines refuse it within 30 seconds
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/Error" }
 
   /v1/quotas:
     get:
@@ -243,6 +264,10 @@ paths:
       responses:
         "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/APIKey" } } } }
         "422": { $ref: "#/components/responses/Error" }
+    get:
+      summary: List the tenant's API keys, including revoked and expired ones (admin); secrets are never returned
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/APIKeyList" } } } }
   /v1/api-keys/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
     delete:
@@ -250,6 +275,16 @@ paths:
       responses:
         "204": { description: Revoked }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/api-keys/{id}/rotate:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+    post:
+      summary: Issue a replacement with the same name and role (admin); the old key keeps working until the grace period ends (LLD §20.2)
+      requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/RotateAPIKeyRequest" } } } }
+      responses:
+        "201": { description: The replacement; its key is returned only once, content: { application/json: { schema: { $ref: "#/components/schemas/APIKey" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
 
 components:
   securitySchemes:
@@ -571,3 +606,43 @@ components:
         key: { type: string, description: Shown only in the creation response }
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
+    APIKeySummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        role: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, description: Updated at most once a minute per API node }
+    APIKeyList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/APIKeySummary" } }
+    RotateAPIKeyRequest:
+      type: object
+      properties:
+        grace: { type: string, default: 24h, description: "How long the old key keeps working, as a Go duration (0s to 720h)" }
+        expires_at: { type: string, format: date-time, description: The replacement's expiry }
+    WorkerTokenRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 100 }
+        expires_at: { type: string, format: date-time }
+    WorkerToken:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        pool: { type: string }
+        name: { type: string }
+        token: { type: string, description: "jsw_<prefix>_<secret>; shown only in the creation response" }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, description: Updated at most once a minute per engine node }
+    WorkerTokenList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/WorkerToken" } }

@@ -107,7 +107,13 @@ func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
 	s.handle("GET /v1/operations/{id}", domain.RoleViewer, s.getOperation)
 
 	s.handle("POST /v1/api-keys", domain.RoleAdmin, s.createAPIKey)
+	s.handle("GET /v1/api-keys", domain.RoleAdmin, s.listAPIKeys)
 	s.handle("DELETE /v1/api-keys/{id}", domain.RoleAdmin, s.revokeAPIKey)
+	s.handle("POST /v1/api-keys/{id}/rotate", domain.RoleAdmin, s.rotateAPIKey)
+
+	s.handle("POST /v1/pools/{name}/worker-tokens", domain.RolePlatformAdmin, s.createWorkerToken)
+	s.handle("GET /v1/pools/{name}/worker-tokens", domain.RolePlatformAdmin, s.listWorkerTokens)
+	s.handle("DELETE /v1/pools/{name}/worker-tokens/{id}", domain.RolePlatformAdmin, s.revokeWorkerToken)
 	return s
 }
 

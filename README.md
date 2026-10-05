@@ -10,7 +10,7 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 |---|---|
 | [High-level design](docs/architecture.md) | Requirements, architecture, failure scenarios, deployment |
 | [Low-level design](docs/low-level-design.md) | Code structure, state machines, algorithms (grows each phase) |
-| [Decision records](docs/decisions/) | ADR-001 to ADR-024, one decision per file |
+| [Decision records](docs/decisions/) | ADR-001 to ADR-025, one decision per file |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
 
 ## Quick start
@@ -50,7 +50,7 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 | `JS_TENANT_RATE_LIMIT` / `JS_API_REPLICAS` | `500` / `1` |
 | `JS_MIN_SCHEDULE_INTERVAL` | `1m` |
 | `JS_BACKLOG_TARGET` | `5m` (pool backlog target for pools without their own: `LOW` is shed past it, `NORMAL` past 3×) |
-| `JS_WORKER_TOKEN` | required for `engine` (≥ 16 chars) |
+| `JS_WORKER_TOKEN` | optional cluster token for `engine` (≥ 16 chars) that admits workers to every pool; production uses per-pool tokens from `POST /v1/pools/{name}/worker-tokens` ([ADR-025](docs/decisions/ADR-025-per-pool-worker-tokens.md)) |
 | `JS_WORKER_ADDR` / `JS_WORKER_ADVERTISE_ADDR` | `:7070` / the listen address |
 | `JS_NODE_ID` | hostname + random suffix |
 | `JS_HISTORY_RETENTION` | `720h` (30 days) |

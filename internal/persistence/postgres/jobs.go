@@ -342,6 +342,7 @@ type Completion struct {
 	Error     string
 	Result    []byte // JSON; stored only on success
 	Actor     domain.Actor
+	Pool      string // when set, a job in another pool is not found (ADR-025)
 }
 
 type CompletionResult struct {
@@ -378,6 +379,9 @@ func (s *Store) CompleteAttempt(ctx context.Context, c Completion) (CompletionRe
 		job, err := scanJob(tx.QueryRow(ctx, `SELECT `+activeColumns+`, now() FROM jobs WHERE id = $1 FOR UPDATE`, jobID), &now)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
+		}
+		if err == nil && c.Pool != "" && job.Pool != c.Pool {
+			return domain.ErrNotFound
 		}
 		if err != nil || !attemptIsCurrent(job, c.Number, attemptID) {
 			res, err = resolveUnmatchedCompletion(ctx, tx, jobID, attemptID, c)
@@ -442,6 +446,8 @@ func resolveUnmatchedCompletion(ctx context.Context, tx pgx.Tx, jobID, attemptID
 	switch {
 	case jobErr != nil:
 		return CompletionResult{}, jobErr
+	case c.Pool != "" && job.Pool != c.Pool:
+		return CompletionResult{}, domain.ErrNotFound
 	case err == nil && domain.AttemptState(recorded) == c.End.State:
 		return CompletionResult{Job: job, Replayed: true}, nil
 	default:

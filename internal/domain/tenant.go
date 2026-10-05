@@ -61,9 +61,28 @@ type APIKey struct {
 	CreatedAt  time.Time
 	ExpiresAt  time.Time // zero means never
 	RevokedAt  time.Time // zero means active
+	LastUsedAt time.Time // zero means never seen
 }
 
 // Usable reports whether the key may authenticate at now.
 func (k APIKey) Usable(now time.Time) bool {
 	return k.RevokedAt.IsZero() && (k.ExpiresAt.IsZero() || now.Before(k.ExpiresAt))
+}
+
+// WorkerToken authenticates the workers of one pool (ADR-025); only its hash is stored.
+type WorkerToken struct {
+	ID         string
+	Pool       string
+	Name       string
+	Prefix     string
+	SecretHash []byte
+	CreatedAt  time.Time
+	ExpiresAt  time.Time // zero means never
+	RevokedAt  time.Time // zero means active
+	LastUsedAt time.Time // zero means never seen
+}
+
+// Usable reports whether the token may authenticate at now.
+func (t WorkerToken) Usable(now time.Time) bool {
+	return t.RevokedAt.IsZero() && (t.ExpiresAt.IsZero() || now.Before(t.ExpiresAt))
 }

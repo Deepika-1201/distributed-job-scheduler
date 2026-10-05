@@ -43,6 +43,11 @@ func TestLoadEngineSettings(t *testing.T) {
 	}); err != nil {
 		t.Errorf("api-only process required a worker token: %v", err)
 	}
+	if cfg, err := Load(func(k string) (string, bool) {
+		return map[string]string{"JS_DATABASE_URL": "postgres://db/jobs", "JS_ROLES": "engine"}[k], k != "JS_WORKER_TOKEN"
+	}); err != nil || cfg.Engine.WorkerToken != "" {
+		t.Errorf("engine without a cluster token = %+v, %v; want it accepted: per-pool tokens suffice (ADR-025)", cfg.Engine, err)
+	}
 	if strings.Contains(fmtErr(Load(env(map[string]string{"JS_WORKER_TOKEN": "short-secret"}))), "short-secret") {
 		t.Error("error echoes the worker token")
 	}

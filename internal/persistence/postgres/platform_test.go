@@ -59,7 +59,7 @@ func TestDrainReachesTheWorker(t *testing.T) {
 	if err := f.store.DrainSession(ctx, ws.ID, f.tenant, testAudit); err != nil {
 		t.Fatal(err)
 	}
-	res, err := f.store.Heartbeat(ctx, ws.ID, nil, 30*time.Second)
+	res, err := f.store.Heartbeat(ctx, ws.ID, "", nil, 30*time.Second)
 	if err != nil || !res.Drain {
 		t.Fatalf("heartbeat after drain = %+v, %v; want drain", res, err)
 	}

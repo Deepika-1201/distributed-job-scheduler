@@ -74,8 +74,9 @@ type HeartbeatResult struct {
 const unreportedGrace = 15 * time.Second
 
 // Heartbeat renews an active session's lease and reconciles the attempts the worker reports
-// holding with those the database assigns to it.
-func (s *Store) Heartbeat(ctx context.Context, id domain.SessionID, held []AttemptRef, ttl time.Duration) (HeartbeatResult, error) {
+// holding with those the database assigns to it. A non-empty pool limits it to that pool's
+// sessions (ADR-025).
+func (s *Store) Heartbeat(ctx context.Context, id domain.SessionID, pool string, held []AttemptRef, ttl time.Duration) (HeartbeatResult, error) {
 	sid, ok := canonicalUUID(string(id))
 	if !ok {
 		return HeartbeatResult{}, domain.ErrNotFound
@@ -85,8 +86,8 @@ func (s *Store) Heartbeat(ctx context.Context, id domain.SessionID, held []Attem
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
 			UPDATE worker_sessions SET heartbeat_at = now(), lease_expires_at = now() + make_interval(secs => $2)
-			WHERE id = $1 AND state = 'ACTIVE'
-			RETURNING draining`, sid, ttl.Seconds()).Scan(&res.Drain)
+			WHERE id = $1 AND state = 'ACTIVE' AND ($3 = '' OR pool = $3)
+			RETURNING draining`, sid, ttl.Seconds(), pool).Scan(&res.Drain)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.ErrNotFound
 		}
@@ -113,14 +114,14 @@ func (s *Store) Heartbeat(ctx context.Context, id domain.SessionID, held []Attem
 }
 
 // CloseSession ends a drained session. Attempts it still holds are recorded as lost, since
-// they may have run.
-func (s *Store) CloseSession(ctx context.Context, id domain.SessionID) error {
+// they may have run. A non-empty pool limits it to that pool's sessions (ADR-025).
+func (s *Store) CloseSession(ctx context.Context, id domain.SessionID, pool string) error {
 	sid, ok := canonicalUUID(string(id))
 	if !ok {
 		return domain.ErrNotFound
 	}
 	tag, err := s.pool.Exec(ctx, `UPDATE worker_sessions SET state = 'CLOSED', closed_at = now()
-		WHERE id = $1 AND state = 'ACTIVE'`, sid)
+		WHERE id = $1 AND state = 'ACTIVE' AND ($2 = '' OR pool = $2)`, sid, pool)
 	if err != nil {
 		return err
 	}

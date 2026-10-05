@@ -4,7 +4,6 @@ package dispatch
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -34,7 +33,7 @@ import (
 type Config struct {
 	NodeID            string // lease holder identity, unique per process start
 	AdvertiseAddr     string // how workers reach this node, for redirects
-	Token             string // bearer token workers present
+	Token             string // cluster token, authorizing every pool; optional (ADR-025)
 	Listener          net.Listener
 	SessionTTL        time.Duration // default 30 s
 	HeartbeatInterval time.Duration // default 5 s
@@ -89,6 +88,7 @@ type Dispatcher struct {
 	log    *slog.Logger
 	leases *coordination.Manager
 	server *grpc.Server
+	auth   *workerAuth
 
 	mu     sync.Mutex
 	pools  map[string]*pool     // pools this node dispatches
@@ -106,11 +106,12 @@ func New(store *postgres.Store, cfg Config, log *slog.Logger) (*Dispatcher, erro
 	if err := cfg.Weights.Validate(); err != nil {
 		return nil, err
 	}
-	if cfg.Token == "" || cfg.NodeID == "" || cfg.Listener == nil {
-		return nil, errors.New("dispatch: token, node ID and listener are required")
+	if cfg.NodeID == "" || cfg.Listener == nil {
+		return nil, errors.New("dispatch: node ID and listener are required")
 	}
 	d := &Dispatcher{cfg: cfg, store: store, log: log.With("component", "dispatcher"),
 		pools: map[string]*pool{}, wanted: map[string]time.Time{}}
+	d.auth = newWorkerAuth(cfg.Token, store, time.Now, d.log)
 	d.leases = coordination.NewManager(store, coordination.Config{
 		Name: "pool-leases", Holder: cfg.NodeID, Address: cfg.AdvertiseAddr,
 		TTL: coordination.PoolTTL, Margin: coordination.Margin,
@@ -158,10 +159,22 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 func (d *Dispatcher) authenticate(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	md, _ := metadata.FromIncomingContext(ctx)
 	got := md.Get("authorization")
-	if len(got) != 1 || subtle.ConstantTimeCompare([]byte(got[0]), []byte("Bearer "+d.cfg.Token)) != 1 {
-		return nil, status.Error(codes.Unauthenticated, "a valid worker token is required")
+	if len(got) != 1 {
+		return nil, status.Error(codes.Unauthenticated, errUnauthenticated.Error())
 	}
-	return handler(ctx, req)
+	s, err := d.auth.authenticate(ctx, got[0])
+	switch {
+	case errors.Is(err, errUnauthenticated):
+		return nil, status.Error(codes.Unauthenticated, err.Error())
+	case err != nil:
+		d.log.Error("checking a worker token failed", "error", err)
+		return nil, status.Error(codes.Unavailable, "cannot check the worker token now")
+	}
+	return handler(context.WithValue(ctx, scopeKey{}, s), req)
+}
+
+func denied(pool string) error {
+	return status.Errorf(codes.PermissionDenied, "the worker token is not authorized for pool %q", pool)
 }
 
 func (d *Dispatcher) Register(ctx context.Context, req *workerpb.RegisterRequest) (*workerpb.RegisterResponse, error) {
@@ -177,6 +190,9 @@ func (d *Dispatcher) Register(ctx context.Context, req *workerpb.RegisterRequest
 		if !namePattern.MatchString(jt) {
 			return nil, status.Errorf(codes.InvalidArgument, "job type %q must match %s", jt, namePattern)
 		}
+	}
+	if !scopeOf(ctx).allows(req.Pool) {
+		return nil, denied(req.Pool)
 	}
 	ws, err := d.store.CreateSession(ctx, domain.WorkerSession{Pool: req.Pool, WorkerID: truncate(req.WorkerId, 200),
 		JobTypes: req.JobTypes, Slots: int(req.Slots), Labels: req.Labels, RuntimeVersion: truncate(req.RuntimeVersion, 100)},
@@ -194,6 +210,9 @@ func (d *Dispatcher) Poll(ctx context.Context, req *workerpb.PollRequest) (*work
 	sess, err := d.store.GetActiveSession(ctx, domain.SessionID(req.SessionId))
 	if err != nil {
 		return nil, d.toStatus(err)
+	}
+	if !scopeOf(ctx).allows(sess.Pool) {
+		return nil, denied(sess.Pool)
 	}
 	if sess.Draining {
 		// Hold the call so a worker that hasn't seen the flag yet doesn't spin.
@@ -238,7 +257,7 @@ func (d *Dispatcher) Heartbeat(ctx context.Context, req *workerpb.HeartbeatReque
 	for i, r := range req.Running {
 		held[i] = postgres.AttemptRef{JobID: domain.JobID(r.JobId), AttemptID: domain.AttemptID(r.AttemptId)}
 	}
-	res, err := d.store.Heartbeat(ctx, domain.SessionID(req.SessionId), held, d.cfg.SessionTTL)
+	res, err := d.store.Heartbeat(ctx, domain.SessionID(req.SessionId), scopeOf(ctx).storePool(), held, d.cfg.SessionTTL)
 	if err != nil {
 		return nil, d.toStatus(err)
 	}
@@ -276,6 +295,7 @@ func (d *Dispatcher) Complete(ctx context.Context, req *workerpb.CompleteRequest
 	res, err := d.store.CompleteAttempt(ctx, postgres.Completion{
 		JobID: domain.JobID(req.JobId), AttemptID: domain.AttemptID(req.AttemptId), Number: int(req.AttemptNumber),
 		End: end, Error: truncate(req.Error, maxErrorBytes), Result: result, Actor: domain.ActorDispatcher,
+		Pool: scopeOf(ctx).storePool(),
 	})
 	if err != nil {
 		if errors.Is(err, domain.ErrStaleAttempt) {
@@ -287,7 +307,7 @@ func (d *Dispatcher) Complete(ctx context.Context, req *workerpb.CompleteRequest
 }
 
 func (d *Dispatcher) Deregister(ctx context.Context, req *workerpb.DeregisterRequest) (*workerpb.DeregisterResponse, error) {
-	if err := d.store.CloseSession(ctx, domain.SessionID(req.SessionId)); err != nil {
+	if err := d.store.CloseSession(ctx, domain.SessionID(req.SessionId), scopeOf(ctx).storePool()); err != nil {
 		return nil, d.toStatus(err)
 	}
 	d.log.Info("worker deregistered", "session_id", req.SessionId)

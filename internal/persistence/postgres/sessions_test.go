@@ -43,13 +43,13 @@ func TestSessionLifecycle(t *testing.T) {
 	if pools, err := f.store.WantedPools(ctx); err != nil || !slices.Equal(pools, []string{"default"}) {
 		t.Errorf("WantedPools = %v, %v", pools, err)
 	}
-	if _, err := f.store.Heartbeat(ctx, ws.ID, nil, 30*time.Second); err != nil {
+	if _, err := f.store.Heartbeat(ctx, ws.ID, "", nil, 30*time.Second); err != nil {
 		t.Errorf("Heartbeat: %v", err)
 	}
-	if err := f.store.CloseSession(ctx, ws.ID); err != nil {
+	if err := f.store.CloseSession(ctx, ws.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.store.Heartbeat(ctx, ws.ID, nil, 30*time.Second); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := f.store.Heartbeat(ctx, ws.ID, "", nil, 30*time.Second); !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("heartbeat on a closed session = %v, want ErrNotFound", err)
 	}
 	if _, err := f.store.GetActiveSession(ctx, ws.ID); !errors.Is(err, domain.ErrNotFound) {
@@ -57,6 +57,45 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 	if pools, _ := f.store.WantedPools(ctx); len(pools) != 0 {
 		t.Errorf("pools after close = %v", pools)
+	}
+}
+
+// A worker token scopes session and completion calls to its pool (ADR-025): another pool's
+// session and job are not found, and the right pool still works.
+func TestPoolScopedCallsIgnoreOtherPools(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.submit(f.newJob())
+	ws := f.session("default")
+	job := f.claimFor(ws, 1, nil)[0]
+	if _, err := f.store.Heartbeat(ctx, ws.ID, "batch", nil, 30*time.Second); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("heartbeat scoped to another pool = %v, want ErrNotFound", err)
+	}
+	if err := f.store.CloseSession(ctx, ws.ID, "batch"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("close scoped to another pool = %v, want ErrNotFound", err)
+	}
+	done := Completion{JobID: job.ID, AttemptID: job.Current.ID, Number: job.Current.Number,
+		End: domain.AttemptEnd{State: domain.AttemptSucceeded}, Actor: domain.ActorDispatcher, Pool: "batch"}
+	if _, err := f.store.CompleteAttempt(ctx, done); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("completion scoped to another pool = %v, want ErrNotFound", err)
+	}
+	if got, _ := f.store.GetJob(ctx, f.tenant, job.ID); got.State != domain.StateRunning {
+		t.Fatalf("job is %s after a rejected completion, want RUNNING", got.State)
+	}
+
+	if _, err := f.store.Heartbeat(ctx, ws.ID, "default", nil, 30*time.Second); err != nil {
+		t.Errorf("heartbeat scoped to its pool: %v", err)
+	}
+	done.Pool = "default"
+	if _, err := f.store.CompleteAttempt(ctx, done); err != nil {
+		t.Errorf("completion scoped to its pool: %v", err)
+	}
+	done.Pool = "batch"
+	if _, err := f.store.CompleteAttempt(ctx, done); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("replay scoped to another pool = %v, want ErrNotFound", err)
+	}
+	if err := f.store.CloseSession(ctx, ws.ID, "default"); err != nil {
+		t.Errorf("close scoped to its pool: %v", err)
 	}
 }
 
@@ -141,7 +180,7 @@ func TestHeartbeatReconcilesAttempts(t *testing.T) {
 	// The forgotten attempt started long enough ago to count as undelivered.
 	f.exec(`UPDATE jobs SET attempt_started_at = now() - interval '1 minute' WHERE id = $1`, string(forgotten.ID))
 
-	res, err := f.store.Heartbeat(ctx, ws.ID, []AttemptRef{
+	res, err := f.store.Heartbeat(ctx, ws.ID, "", []AttemptRef{
 		{JobID: reported.ID, AttemptID: reported.Current.ID}, {JobID: cancelled.ID, AttemptID: cancelled.Current.ID}, stale,
 	}, 30*time.Second)
 	if err != nil {
@@ -164,7 +203,7 @@ func TestCloseSessionLosesHeldAttempts(t *testing.T) {
 	f.submit(f.newJob())
 	ws := f.session("default")
 	job := f.claimFor(ws, 1, nil)[0]
-	if err := f.store.CloseSession(ctx, ws.ID); err != nil {
+	if err := f.store.CloseSession(ctx, ws.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := f.store.GetJob(ctx, f.tenant, job.ID)

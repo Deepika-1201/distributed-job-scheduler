@@ -23,6 +23,7 @@ Implements the [HLD](architecture.md). This document grows phase by phase, and e
 | [17. Observability](#17-observability) | 11 | Written |
 | [18. Pool backlog](#18-pool-backlog) | 11 | Written |
 | [19. Load-test gate](#19-load-test-gate) | 5 | Written |
+| [20. Security hardening](#20-security-hardening) | 12 | Written |
 | Events and outbox | Later | Planned |
 
 The [HLD's open questions](architecture.md#appendix-c--open-questions-for-the-lld) are resolved in the phase that needs them: 1–5 in phase 3 (§8.1), 6 and 12 in phase 4, 7–9 in phase 8, 10 and 11 in phase 6, 13 in phase 10, 14 in phase 4.
@@ -619,7 +620,7 @@ Implements HLD §12 and [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.m
 - **Service:** gRPC service `jobscheduler.worker.v1.WorkerService` ([proto](../proto/jobscheduler/worker/v1/worker.proto)). The generated code in `pkg/workerpb` is committed; `make proto` regenerates it.
 - **Calls:** all unary, and `Poll` is a long-poll. Unary calls pass through any HTTP/2 load balancer and are simple to retry.
 - **Versioning:** fields are only ever added. A breaking change means a `v2` package served side by side.
-- **Authentication:** `authorization: Bearer <JS_WORKER_TOKEN>`, compared in constant time. Per-pool tokens and TLS come with phase 12.
+- **Authentication:** `authorization: Bearer <token>`, either a per-pool worker token scoped to its pool or the optional cluster token `JS_WORKER_TOKEN` ([ADR-025](decisions/ADR-025-per-pool-worker-tokens.md), §20.1).
 
 | RPC | Served by | Behavior |
 |---|---|---|
@@ -1109,3 +1110,110 @@ The run that decides is in the deployment environment (phase 13). Until then, a 
 
 - Gate: parsing the exposition format, summing changes across nodes, the exact share at a bucket bound, quantile interpolation, each check's verdict, and the CPU projection.
 - CI runs the smoke scenario on every push.
+
+## 20. Security hardening
+
+Completes HLD §16 (phase 12) with worker credentials, API key rotation, TLS, least-privilege database roles, the row-level security decision and the security checks.
+
+### 20.1 Per-pool worker tokens
+
+[ADR-025](decisions/ADR-025-per-pool-worker-tokens.md).
+
+- **Format:** `jsw_<prefix>_<secret>`, stored as API keys are: a lookup prefix and the SHA-256 of the whole token, shown once.
+- **Table `worker_tokens`** (phase 12 migration, part 3): `id`, `pool`, `name`, `prefix` (unique), `secret_hash`, `created_at`, `expires_at`, `revoked_at`, `last_used_at`.
+- **API**, for platform-admins:
+  - `POST /v1/pools/{name}/worker-tokens` with `name` and optional `expires_at`;
+  - `GET /v1/pools/{name}/worker-tokens`;
+  - `DELETE /v1/pools/{name}/worker-tokens/{id}`.
+
+  Creating and revoking are audited.
+- **Authentication:** the engine checks every RPC's bearer token. It accepts:
+  - a pool token, valid for its pool;
+  - the cluster token `JS_WORKER_TOKEN`, now optional. It authorizes every pool and is meant for local development and migration.
+
+  Successful checks are cached for 30 s, so a revoked token stops working within that time.
+- **Authorization** by call:
+
+  | Call | Check | On mismatch |
+  |---|---|---|
+  | `Register` | The token's pool is the requested pool | `PERMISSION_DENIED` |
+  | `Poll` | The token's pool is the session's pool | `PERMISSION_DENIED` |
+  | `Heartbeat`, `Deregister` | The update matches only sessions of the token's pool | `NOT_FOUND`: the SDK treats the session as lost |
+  | `Complete` | The job is in the token's pool, checked under its row lock | `NOT_FOUND`: the SDK drops the report |
+- **Rotation:** create a second token, roll the pool's workers onto it, then revoke the first. `last_used_at`, updated at most once a minute per token and node, shows when the old token has gone quiet.
+
+### 20.2 API key rotation
+
+HLD §16.1 asks for rotatable keys with last-used tracking.
+
+- `GET /v1/api-keys` (admin): the tenant's keys with `last_used_at`, never their secrets.
+- `POST /v1/api-keys/{id}/rotate` (admin), with optional `grace` and `expires_at`:
+  - creates a key with the same name and role, and the optional new expiry;
+  - makes the old key expire after `grace` (default 24 h, at most 30 days), unless it expires sooner;
+  - requires the caller's role to include the key's, and is audited as `api_key.rotate`.
+- `last_used_at` is written when a key is verified against the database, at most once a minute per key and node, so requests served from the 30 s cache cost nothing.
+
+### 20.3 TLS
+
+[ADR-026](decisions/ADR-026-tls-in-process.md).
+
+- **Servers:** `JS_TLS_CERT_FILE` and `JS_TLS_KEY_FILE`, both or neither, turn on TLS 1.2+ for the HTTP API and the worker gRPC server.
+- **Ops server:** it stays plaintext. It carries no tenant data, and orchestrator health checks and the metrics scraper reach it inside the network.
+- **Reload:** the certificate is reloaded when either file changes, checked at most every 30 s, so a rotated certificate takes effect without a restart.
+- **HSTS:** with TLS on, API responses carry `Strict-Transport-Security`.
+- **Workers:** they verify the owner they are redirected to, so the certificate must cover every engine's `JS_WORKER_ADVERTISE_ADDR`. The SDK takes TLS through `DialOptions`, and `demo-worker` has `-tls-ca`.
+- **Database:** connections use TLS through `JS_DATABASE_URL` (`sslmode=verify-full`, `sslrootcert`).
+
+### 20.4 Database roles
+
+[ADR-027](decisions/ADR-027-least-privilege-database-roles.md).
+
+- **Roles:** a migration creates the group role `jobscheduler_runtime` (`NOLOGIN`). Deployments grant it to the login role the nodes use, and migrations run as the owner role.
+- **Runtime privileges:**
+  - `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the tables, including tables later migrations create, through the owner's default privileges;
+  - on `audit_log`, only `SELECT` and `INSERT`;
+  - no DDL, no `TRUNCATE`.
+- **Partition maintenance** goes through two `SECURITY DEFINER` functions owned by the owner role. Each takes a parent, which must be `job_history` or `attempts`, and a day; it builds the partition's name and bounds itself, and pins `search_path`.
+  - `jobscheduler_create_partition(parent, day)` creates the day's partition if it is missing.
+  - `jobscheduler_drop_partition(parent, day)` drops it, waiting at most 1 s for its lock.
+  - Only `jobscheduler_runtime` may execute them.
+
+### 20.5 Row-level security
+
+Not adopted in V1 ([ADR-028](decisions/ADR-028-row-level-security.md)). Tenant scoping stays in the repository, and §20.6's route-wide test checks every route.
+
+### 20.6 Security checks
+
+- **Tenant isolation:** a table-driven test covers every route.
+  - Each tenant route is called with another tenant's resource IDs and must answer `404`.
+  - Lists return only the caller's resources.
+  - Platform routes refuse tenant admin keys with `403`.
+  - The test fails when a route isn't in its table.
+- **Response headers:** every API response carries `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and `Referrer-Policy: no-referrer`.
+- **CI:**
+  - `govulncheck` on every push;
+  - the container image is built and scanned with Trivy, failing on fixable `HIGH` or `CRITICAL` findings;
+  - Dependabot updates Go modules, GitHub Actions and the Docker base images weekly.
+
+### 20.7 OWASP API Security Top 10 (2023)
+
+| Risk | Controls | Checked by |
+|---|---|---|
+| API1 Broken object level authorization | The tenant comes from the credential alone. Every tenant query takes it, and other tenants' objects are not found. | §20.6 isolation test; store cross-tenant tests |
+| API2 Broken authentication | Hashed keys and tokens with lookup prefixes, constant-time comparison, expiry, revocation and rotation; per-pool worker tokens | API key, rotation and worker-token tests |
+| API3 Broken object property level authorization | Requests decode into structs that list their fields. Tenant, state and audit fields never come from bodies, and responses never include secrets or hashes. | API contract tests |
+| API4 Unrestricted resource consumption | Body and payload limits, per-tenant rates and quotas, page-size limits, load shedding and server timeouts | Quota, shedding and limit tests |
+| API5 Broken function level authorization | One role per route, checked before the handler; a key cannot grant more than its creator's role | Route role tests; §20.6 |
+| API6 Unrestricted access to sensitive business flows | Rate limits and quotas; `CRITICAL` priority is limited to operators | Quota and priority tests |
+| API7 Server-side request forgery | The platform makes no outbound requests built from request data. A future HTTP executor needs allow-lists (HLD §16.5). | Not applicable |
+| API8 Security misconfiguration | TLS, security headers, a non-root distroless image, dependency and image scanning | Header test; CI |
+| API9 Improper inventory management | One OpenAPI contract with a versioned `/v1` | Contract tests |
+| API10 Unsafe consumption of APIs | No third-party APIs are consumed | Not applicable |
+
+### 20.8 Tests
+
+- **Worker tokens:** issue, list, revoke and rotate. A token for one pool cannot register, poll, heartbeat, complete or deregister in another. The cluster token still works, and revoked or expired tokens stop working.
+- **API keys:** listing, rotation (the old key works until its grace ends) and last-used tracking.
+- **TLS:** HTTPS and gRPC with a generated certificate, and reload after the files change.
+- **Roles:** a login role holding only `jobscheduler_runtime` runs submissions, claims, completions and maintenance, but cannot create tables or change `audit_log`.
+- **Isolation and headers:** §20.6.

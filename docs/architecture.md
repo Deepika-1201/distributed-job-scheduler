@@ -1371,7 +1371,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-011](decisions/ADR-011-caching-and-redis.md) | Caching and Redis | Accepted |
 | [ADR-012](decisions/ADR-012-language-and-core-libraries.md) | Language and core libraries | Accepted; amended by ADR-013 and ADR-014 |
 | [ADR-013](decisions/ADR-013-cron-evaluation.md) | Cron evaluation with explicit DST rules | Accepted |
-| [ADR-014](decisions/ADR-014-worker-protocol.md) | Worker protocol: unary calls, long-poll and owner redirects | Accepted; amended by ADR-023 |
+| [ADR-014](decisions/ADR-014-worker-protocol.md) | Worker protocol: unary calls, long-poll and owner redirects | Accepted; amended by ADR-023 and ADR-025 |
 | [ADR-015](decisions/ADR-015-releasing-undelivered-assignments.md) | Releasing assignments that were never delivered | Accepted |
 | [ADR-016](decisions/ADR-016-withdrawing-provisional-schedule-jobs.md) | Schedule changes withdraw provisional jobs by deleting them | Accepted |
 | [ADR-017](decisions/ADR-017-platform-administration.md) | Platform administration: platform-admin role, dispatch holds and worker drain | Accepted |
@@ -1382,6 +1382,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-022](decisions/ADR-022-dispatch-latency-from-a-free-worker.md) | Dispatch latency counts from a free worker | Accepted |
 | [ADR-023](decisions/ADR-023-session-calls-fall-back-to-the-owner.md) | Worker session calls fall back to the pool owner | Accepted |
 | [ADR-024](decisions/ADR-024-load-test-gate.md) | Load-test gate: k6 submissions, an SDK worker fleet and server-side histograms | Accepted |
+| [ADR-025](decisions/ADR-025-per-pool-worker-tokens.md) | Per-pool worker tokens, issued through the API | Accepted |
 
 ## Appendix C — Open questions for the LLD
 

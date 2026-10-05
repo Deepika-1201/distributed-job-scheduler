@@ -42,17 +42,33 @@ func NewAPIKey(tenant domain.TenantID, name string, role domain.Role, expires ti
 	}
 }
 
+// NewWorkerToken returns a pool token's plaintext, to show once, and the form to store (ADR-025).
+func NewWorkerToken(pool, name string, expires time.Time) (string, domain.WorkerToken) {
+	prefix := randomToken(5)
+	plaintext := "jsw_" + prefix + "_" + randomToken(32)
+	sum := sha256.Sum256([]byte(plaintext))
+	return plaintext, domain.WorkerToken{
+		ID: uuid.Must(uuid.NewV7()).String(), Pool: pool, Name: name, Prefix: prefix,
+		SecretHash: sum[:], ExpiresAt: expires,
+	}
+}
+
 type keyFinder interface {
 	FindAPIKey(ctx context.Context, prefix string) (domain.APIKey, error)
+	TouchAPIKey(ctx context.Context, id string) error
 }
+
+// keyTouchInterval spaces the writes of a key's last use (LLD §20.2).
+const keyTouchInterval = time.Minute
 
 // authenticator verifies API keys, caching successes briefly so most requests skip the database.
 type authenticator struct {
-	keys  keyFinder
-	now   func() time.Time
-	ttl   time.Duration
-	mu    sync.Mutex
-	cache map[[32]byte]cachedPrincipal
+	keys    keyFinder
+	now     func() time.Time
+	ttl     time.Duration
+	mu      sync.Mutex
+	cache   map[[32]byte]cachedPrincipal
+	touched map[string]time.Time // key ID → when its last use was last written
 }
 
 type cachedPrincipal struct {
@@ -61,7 +77,8 @@ type cachedPrincipal struct {
 }
 
 func newAuthenticator(keys keyFinder, now func() time.Time) *authenticator {
-	return &authenticator{keys: keys, now: now, ttl: 30 * time.Second, cache: map[[32]byte]cachedPrincipal{}}
+	return &authenticator{keys: keys, now: now, ttl: 30 * time.Second, cache: map[[32]byte]cachedPrincipal{},
+		touched: map[string]time.Time{}}
 }
 
 func (a *authenticator) authenticate(ctx context.Context, header string) (principal, error) {
@@ -98,8 +115,22 @@ func (a *authenticator) authenticate(ctx context.Context, header string) (princi
 	}
 	a.mu.Lock()
 	a.cache[sum] = cachedPrincipal{p: p, expires: expires}
+	touch := now.Sub(a.touched[key.ID]) >= keyTouchInterval
+	if touch {
+		a.touched[key.ID] = now
+	}
 	a.mu.Unlock()
+	if touch {
+		go a.touch(key.ID)
+	}
 	return p, nil
+}
+
+// touch records a key's last use; losing one write only makes last_used_at a minute staler.
+func (a *authenticator) touch(id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = a.keys.TouchAPIKey(ctx, id)
 }
 
 // rateLimiter is a token bucket per tenant for this node (LLD §9.6); each tenant has its own

@@ -153,7 +153,7 @@ func (s *Store) DeregisterSession(ctx context.Context, id domain.SessionID, audi
 	if !ok {
 		return domain.ErrNotFound
 	}
-	if err := s.CloseSession(ctx, id); err != nil {
+	if err := s.CloseSession(ctx, id, ""); err != nil {
 		return err
 	}
 	return s.inTx(ctx, func(tx pgx.Tx) error {
