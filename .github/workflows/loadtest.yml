@@ -11,6 +11,9 @@ on:
       pools:
         description: Pools (1 measures a single pool's ceiling)
         default: "4"
+      api_conns:
+        description: Database connections for the api node
+        default: "30"
 
 permissions:
   contents: read
@@ -23,6 +26,7 @@ jobs:
       JS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
       BURST_RATE: ${{ inputs.burst_rate }}
       POOLS: ${{ inputs.pools }}
+      API_DB_MAX_CONNS: ${{ inputs.api_conns }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -41,7 +45,7 @@ jobs:
       - name: Environment
         run: |
           echo "$(nproc) CPUs, $(free -g | awk '/Mem:/ {print $2}') GB memory; $(docker exec pg postgres --version)" | tee -a "$GITHUB_STEP_SUMMARY"
-          docker exec pg pg_test_fsync -s 2 -f /var/lib/postgresql/data/fsync.test | grep -E "fdatasync|open_datasync" | head -2 | tee -a "$GITHUB_STEP_SUMMARY"
+          docker exec pg pg_test_fsync -s 2 -f /var/lib/postgresql/data/fsync.test | grep -A6 "one 8kB write" | grep ops/sec | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Run the gate, sampling CPU and database waits during the burst
         run: |
           (sleep 50; for _ in 1 2 3 4; do

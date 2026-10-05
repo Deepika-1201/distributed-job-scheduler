@@ -61,7 +61,7 @@ start() {
   env "$@" "$JS" serve >"$OUT/$name.log" 2>&1 &
   pids+=($!)
 }
-start api JS_ROLES=api JS_NODE_ID=api JS_HTTP_ADDR=:18180 JS_OPS_ADDR=:19190
+start api JS_ROLES=api JS_NODE_ID=api JS_HTTP_ADDR=:18180 JS_OPS_ADDR=:19190 JS_DB_MAX_CONNS="${API_DB_MAX_CONNS:-$JS_DB_MAX_CONNS}"
 start engine-a JS_ROLES=engine JS_NODE_ID=engine-a JS_HTTP_ADDR=:18181 JS_OPS_ADDR=:19191 \
   JS_WORKER_ADDR=:17170 JS_WORKER_ADVERTISE_ADDR=localhost:17170
 start engine-b JS_ROLES=engine JS_NODE_ID=engine-b JS_HTTP_ADDR=:18182 JS_OPS_ADDR=:19192 \
