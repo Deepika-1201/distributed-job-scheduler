@@ -31,12 +31,31 @@ jobs:
       - name: Start PostgreSQL (durable commits; memory and checkpoints tuned as in run.sh)
         run: |
           docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:17 \
-            -c max_connections=200 -c shared_buffers=1GB -c max_wal_size=8GB -c checkpoint_timeout=30min
+            -c max_connections=200 -c shared_buffers=1GB -c max_wal_size=8GB -c checkpoint_timeout=30min \
+            -c shared_preload_libraries=pg_stat_statements
           for _ in $(seq 60); do docker exec pg pg_isready -q -h localhost -U postgres && break; sleep 1; done
       - name: Environment
         run: |
           echo "$(nproc) CPUs, $(free -g | awk '/Mem:/ {print $2}') GB memory; $(docker exec pg postgres --version)" | tee -a "$GITHUB_STEP_SUMMARY"
-      - run: make loadtest
+      - name: Run the gate, sampling CPU and database waits during the burst
+        run: |
+          (sleep 50; for _ in 1 2 3 4; do
+            echo "== $(date +%T) CPU by process"; top -b -n 1 -w 200 | sed -n '8,20p'
+            echo "-- active database sessions by wait"
+            docker exec pg psql -U postgres -AtF ' ' -c "SELECT coalesce(wait_event_type, 'CPU'), coalesce(wait_event, '-'), count(*)
+              FROM pg_stat_activity WHERE backend_type = 'client backend' AND state <> 'idle' GROUP BY 1, 2 ORDER BY 3 DESC"
+            sleep 5
+          done) > /tmp/diag.txt 2>&1 &
+          make loadtest
+      - if: always()
+        name: Diagnostics
+        run: |
+          cat /tmp/diag.txt
+          docker exec pg psql -U postgres -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements' >/dev/null
+          docker exec pg psql -U postgres -c "SELECT calls, round(total_exec_time) AS total_ms, round(mean_exec_time::numeric, 3) AS mean_ms,
+            left(regexp_replace(query, '\s+', ' ', 'g'), 110) AS query
+            FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 15"
+          docker exec pg psql -U postgres -AtF ' ' -c "SELECT 'wal_bytes', wal_bytes, 'wal_fpi', wal_fpi, 'wal_records', wal_records FROM pg_stat_wal"
       - if: always()
         run: |
           { echo '```'; cat loadtest/out/gate.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
