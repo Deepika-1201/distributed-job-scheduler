@@ -28,15 +28,20 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      # Like a database server: data on the runner's local SSD (/mnt; the OS disk is
+      # IOPS-limited), and host networking instead of Docker's userland port proxy.
       - name: Start PostgreSQL (durable commits; memory and checkpoints tuned as in run.sh)
         run: |
-          docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:17 \
+          sudo mkdir -p /mnt/pgdata
+          docker run -d --name pg --network host -v /mnt/pgdata:/var/lib/postgresql/data \
+            -e POSTGRES_PASSWORD=postgres postgres:17 \
             -c max_connections=200 -c shared_buffers=1GB -c max_wal_size=8GB -c checkpoint_timeout=30min \
             -c shared_preload_libraries=pg_stat_statements
           for _ in $(seq 60); do docker exec pg pg_isready -q -h localhost -U postgres && break; sleep 1; done
       - name: Environment
         run: |
           echo "$(nproc) CPUs, $(free -g | awk '/Mem:/ {print $2}') GB memory; $(docker exec pg postgres --version)" | tee -a "$GITHUB_STEP_SUMMARY"
+          docker exec pg pg_test_fsync -s 2 -f /var/lib/postgresql/data/fsync.test | grep -E "fdatasync|open_datasync" | head -2 | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Run the gate, sampling CPU and database waits during the burst
         run: |
           (sleep 50; for _ in 1 2 3 4; do
