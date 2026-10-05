@@ -3,6 +3,7 @@ package httpserver
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,6 +43,9 @@ func New(name, addr string, h http.Handler, shutdownTimeout time.Duration, log *
 
 func (s *Server) Name() string { return s.name }
 
+// UseTLS serves TLS with c instead of plaintext.
+func (s *Server) UseTLS(c *tls.Config) { s.srv.TLSConfig = c }
+
 // Listen binds the address so port conflicts surface before any component starts.
 // It is idempotent and returns the bound address.
 func (s *Server) Listen() (net.Addr, error) {
@@ -63,10 +67,16 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.log.Info("http server listening", "server", s.name, "addr", addr.String())
+	s.log.Info("http server listening", "server", s.name, "addr", addr.String(), "tls", s.srv.TLSConfig != nil)
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- s.srv.Serve(s.ln) }()
+	go func() {
+		if s.srv.TLSConfig != nil {
+			serveErr <- s.srv.ServeTLS(s.ln, "", "") // certificates come from TLSConfig
+			return
+		}
+		serveErr <- s.srv.Serve(s.ln)
+	}()
 
 	select {
 	case err := <-serveErr:

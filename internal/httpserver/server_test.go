@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"log/slog"
 	"net"
@@ -9,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"jobscheduler/internal/tlsconfig"
+	"jobscheduler/internal/tlsconfig/tlstest"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -74,6 +78,43 @@ func TestListenReportsPortConflict(t *testing.T) {
 	second := New("second", addr.String(), http.NewServeMux(), time.Second, discardLogger())
 	if _, err := second.Listen(); err == nil || !strings.Contains(err.Error(), "second: listen on") {
 		t.Errorf("second Listen = %v, want port conflict error", err)
+	}
+}
+
+func TestServesTLS(t *testing.T) {
+	certFile, keyFile, roots := tlstest.WriteCert(t, t.TempDir(), "api")
+	certs, err := tlsconfig.NewReloader(certFile, keyFile, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, r.Proto)
+	})
+	s := New("test", "127.0.0.1:0", mux, time.Second, discardLogger())
+	s.UseTLS(certs.Config())
+	addr, err := s.Listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx) }()
+
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}, ForceAttemptHTTP2: true}}
+	r, err := client.Get("https://" + addr.String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	if b, _ := io.ReadAll(r.Body); string(b) != "HTTP/2.0" || r.TLS == nil || r.TLS.Version < tls.VersionTLS12 {
+		t.Errorf("served %q over %+v", b, r.TLS)
+	}
+	if r, err := http.Get("http://" + addr.String() + "/"); err == nil {
+		r.Body.Close()
+		if r.StatusCode != http.StatusBadRequest {
+			t.Errorf("plaintext request answered %d", r.StatusCode)
+		}
 	}
 }
 

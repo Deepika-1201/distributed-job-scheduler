@@ -122,6 +122,7 @@ If a component fails, shutdown starts immediately at step 2, skipping the delay.
 | `JS_BACKLOG_TARGET` | `5m` | Backlog target of pools without their own, 10 s–24 h (§18); `JS_SHED_LOW_AFTER` and `JS_SHED_NORMAL_AFTER` are rejected |
 | `JS_SHUTDOWN_DELAY` | `0s` | Time to keep serving after a signal while readiness fails; set to about 5 s behind a load balancer |
 | `JS_SHUTDOWN_TIMEOUT` | `30s` | Maximum time for each component to stop |
+| `JS_TLS_CERT_FILE` / `JS_TLS_KEY_FILE` | empty | PEM certificate and key, both or neither; turn on TLS for the API and worker servers, reloaded when the files change (§20.3) |
 
 ## 3. Domain model
 

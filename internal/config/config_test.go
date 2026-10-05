@@ -48,6 +48,14 @@ func TestLoadEngineSettings(t *testing.T) {
 	}); err != nil || cfg.Engine.WorkerToken != "" {
 		t.Errorf("engine without a cluster token = %+v, %v; want it accepted: per-pool tokens suffice (ADR-025)", cfg.Engine, err)
 	}
+	if _, err := Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs", "JS_TLS_CERT_FILE": "/tls/cert.pem"})); err == nil ||
+		!strings.Contains(err.Error(), "JS_TLS_CERT_FILE: must be set together with JS_TLS_KEY_FILE") {
+		t.Errorf("certificate without a key: %v", err)
+	}
+	if cfg, err := Load(env(map[string]string{"JS_DATABASE_URL": "postgres://db/jobs",
+		"JS_TLS_CERT_FILE": "/tls/cert.pem", "JS_TLS_KEY_FILE": "/tls/key.pem"})); err != nil || !cfg.TLS.Enabled() {
+		t.Errorf("TLS = %+v, %v", cfg.TLS, err)
+	}
 	if strings.Contains(fmtErr(Load(env(map[string]string{"JS_WORKER_TOKEN": "short-secret"}))), "short-secret") {
 		t.Error("error echoes the worker token")
 	}

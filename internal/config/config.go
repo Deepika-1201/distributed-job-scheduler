@@ -40,6 +40,7 @@ type Config struct {
 	Database  Database
 	Log       Log
 	Telemetry Telemetry
+	TLS       TLS
 	// BacklogTarget is the backlog target of pools without their own (ADR-021).
 	BacklogTarget   time.Duration
 	ShutdownDelay   time.Duration
@@ -52,6 +53,14 @@ type Telemetry struct {
 	OTLPInsecure bool   // plaintext to the collector, for local stacks
 	SampleRatio  float64
 }
+
+// TLS turns on TLS for the API and worker servers when both files are set (ADR-026).
+type TLS struct {
+	CertFile string
+	KeyFile  string
+}
+
+func (t TLS) Enabled() bool { return t.CertFile != "" }
 
 // Engine configures the worker protocol served by engine nodes (LLD §12).
 type Engine struct {
@@ -115,6 +124,10 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		BacklogTarget:   p.duration("JS_BACKLOG_TARGET", 5*time.Minute),
 		ShutdownDelay:   p.duration("JS_SHUTDOWN_DELAY", 0),
 		ShutdownTimeout: p.duration("JS_SHUTDOWN_TIMEOUT", 30*time.Second),
+		TLS:             TLS{CertFile: p.str("JS_TLS_CERT_FILE", ""), KeyFile: p.str("JS_TLS_KEY_FILE", "")},
+	}
+	if (cfg.TLS.CertFile == "") != (cfg.TLS.KeyFile == "") {
+		p.fail("JS_TLS_CERT_FILE", "must be set together with JS_TLS_KEY_FILE")
 	}
 	if cfg.Roles.Has(RoleEngine) {
 		cfg.Engine = Engine{

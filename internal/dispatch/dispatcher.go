@@ -4,6 +4,7 @@ package dispatch
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -35,6 +37,7 @@ type Config struct {
 	AdvertiseAddr     string // how workers reach this node, for redirects
 	Token             string // cluster token, authorizing every pool; optional (ADR-025)
 	Listener          net.Listener
+	TLS               *tls.Config   // nil serves plaintext (ADR-026)
 	SessionTTL        time.Duration // default 30 s
 	HeartbeatInterval time.Duration // default 5 s
 	RoundInterval     time.Duration // default 100 ms, while workers wait
@@ -117,7 +120,11 @@ func New(store *postgres.Store, cfg Config, log *slog.Logger) (*Dispatcher, erro
 		TTL: coordination.PoolTTL, Margin: coordination.Margin,
 		Wanted: d.wantedPools, OnAcquired: d.startPool, OnLost: d.stopPool,
 	}, log)
-	d.server = grpc.NewServer(grpc.StatsHandler(observability.GRPCServerHandler()), grpc.UnaryInterceptor(d.authenticate))
+	opts := []grpc.ServerOption{grpc.StatsHandler(observability.GRPCServerHandler()), grpc.UnaryInterceptor(d.authenticate)}
+	if cfg.TLS != nil {
+		opts = append(opts, grpc.Creds(credentials.NewTLS(cfg.TLS)))
+	}
+	d.server = grpc.NewServer(opts...)
 	workerpb.RegisterWorkerServiceServer(d.server, d)
 	return d, nil
 }

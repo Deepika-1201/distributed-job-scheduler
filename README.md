@@ -10,7 +10,7 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 |---|---|
 | [High-level design](docs/architecture.md) | Requirements, architecture, failure scenarios, deployment |
 | [Low-level design](docs/low-level-design.md) | Code structure, state machines, algorithms (grows each phase) |
-| [Decision records](docs/decisions/) | ADR-001 to ADR-025, one decision per file |
+| [Decision records](docs/decisions/) | ADR-001 to ADR-026, one decision per file |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
 
 ## Quick start
@@ -59,8 +59,9 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 | `JS_OTLP_ENDPOINT` / `JS_OTLP_INSECURE` | empty (trace export off) / `false` |
 | `JS_TRACE_SAMPLE_RATIO` | `1` (share of root traces kept) |
 | `JS_SHUTDOWN_DELAY` / `JS_SHUTDOWN_TIMEOUT` | `0s` / `30s` |
+| `JS_TLS_CERT_FILE` / `JS_TLS_KEY_FILE` | empty (plaintext); both set turn on TLS for the API and worker ports, reloaded on change ([ADR-026](docs/decisions/ADR-026-tls-in-process.md)) |
 
-Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./bin/demo-worker`.
+Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./bin/demo-worker` (add `-tls-ca ca.pem` when the engine serves TLS).
 
 ## Observability
 

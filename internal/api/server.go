@@ -39,6 +39,8 @@ type Config struct {
 	BacklogTarget time.Duration
 	// Addr is the listen address, whose port labels the HTTP metrics.
 	Addr string
+	// TLS reports that the API is served over TLS, which adds HSTS (ADR-026).
+	TLS bool
 }
 
 type Server struct {
@@ -52,10 +54,11 @@ type Server struct {
 	mux       *http.ServeMux
 	routes    []string
 	addr      string
+	hsts      bool
 }
 
 func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
-	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux(), addr: cfg.Addr}
+	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux(), addr: cfg.Addr, hsts: cfg.TLS}
 	s.auth = newAuthenticator(store, s.now)
 	s.limiter = newRateLimiter(s.now)
 	s.schemas = &schemaCache{}
@@ -231,6 +234,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		r = r.WithContext(ctx)
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 		w.Header().Set("X-Request-Id", id)
+		securityHeaders(w.Header(), s.hsts)
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
 		defer func() {
@@ -244,6 +248,18 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(rec, r)
 	})
+}
+
+// securityHeaders marks every response as JSON for programs only: not sniffed, cached, framed or
+// referred (LLD §20.6).
+func securityHeaders(h http.Header, hsts bool) {
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+	h.Set("Referrer-Policy", "no-referrer")
+	if hsts {
+		h.Set("Strict-Transport-Security", "max-age=31536000")
+	}
 }
 
 // readJSON reads the whole body (kept for idempotency hashing) and decodes it strictly.

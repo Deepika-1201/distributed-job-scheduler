@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -33,6 +34,7 @@ import (
 	"jobscheduler/internal/persistence/postgres"
 	"jobscheduler/internal/recovery"
 	"jobscheduler/internal/scheduling"
+	"jobscheduler/internal/tlsconfig"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -122,6 +124,14 @@ func serve() error {
 	ops := httpserver.New("ops", cfg.OpsAddr, opsMux, cfg.ShutdownTimeout, log)
 	components := []app.Component{ops}
 	store := postgres.NewStore(pool)
+	var serverTLS *tls.Config // the API and worker servers; ops stays plaintext (ADR-026)
+	if cfg.TLS.Enabled() {
+		certs, err := tlsconfig.NewReloader(cfg.TLS.CertFile, cfg.TLS.KeyFile, log)
+		if err != nil {
+			return err
+		}
+		serverTLS = certs.Config()
+	}
 	if cfg.Roles.Has(config.RoleAPI) {
 		apiServer := api.New(store, log, api.Config{
 			TenantRateLimit:     cfg.API.NodeRateLimit(),
@@ -129,8 +139,13 @@ func serve() error {
 			MinScheduleInterval: cfg.API.MinScheduleInterval,
 			BacklogTarget:       cfg.BacklogTarget,
 			Addr:                cfg.HTTPAddr,
+			TLS:                 serverTLS != nil,
 		})
-		components = append(components, httpserver.New("api", cfg.HTTPAddr, apiServer.Handler(), cfg.ShutdownTimeout, log))
+		apiHTTP := httpserver.New("api", cfg.HTTPAddr, apiServer.Handler(), cfg.ShutdownTimeout, log)
+		if serverTLS != nil {
+			apiHTTP.UseTLS(serverTLS)
+		}
+		components = append(components, apiHTTP)
 	}
 	if cfg.Roles.Has(config.RoleEngine) {
 		lis, err := net.Listen("tcp", cfg.Engine.WorkerAddr)
@@ -142,7 +157,7 @@ func serve() error {
 			advertise = lis.Addr().String()
 		}
 		dispatcher, err := dispatch.New(store, dispatch.Config{NodeID: cfg.Engine.NodeID, AdvertiseAddr: advertise,
-			Token: cfg.Engine.WorkerToken, Listener: lis, BacklogTarget: cfg.BacklogTarget}, log)
+			Token: cfg.Engine.WorkerToken, Listener: lis, TLS: serverTLS, BacklogTarget: cfg.BacklogTarget}, log)
 		if err != nil {
 			return err
 		}
