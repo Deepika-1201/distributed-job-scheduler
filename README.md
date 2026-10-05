@@ -10,7 +10,7 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 |---|---|
 | [High-level design](docs/architecture.md) | Requirements, architecture, failure scenarios, deployment |
 | [Low-level design](docs/low-level-design.md) | Code structure, state machines, algorithms (grows each phase) |
-| [Decision records](docs/decisions/) | ADR-001 to ADR-023, one decision per file |
+| [Decision records](docs/decisions/) | ADR-001 to ADR-024, one decision per file |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
 
 ## Quick start
@@ -77,6 +77,14 @@ Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./
 |---|---|---|
 | ![Pools dashboard](docs/images/dashboards/pools.png) | ![Tenants dashboard](docs/images/dashboards/tenants.png) | ![Database and engines dashboard](docs/images/dashboards/database.png) |
 
+## Load test
+
+The load-test gate ([LLD §19](docs/low-level-design.md#19-load-test-gate)) checks that one PostgreSQL primary sustains bursts of 5,000 jobs/s with p99 dispatch latency at most 1 s.
+
+- `gh workflow run loadtest.yml` runs it on a clean GitHub-hosted runner and puts the verdict in the run's summary.
+- `make loadtest` runs the same harness on this machine: a throwaway PostgreSQL (or `JS_DATABASE_URL`), one `api` node, two engines, a fleet of SDK workers, and k6. Logs go to `loadtest/out/`.
+- `make loadtest-smoke` is a short, low-rate version that CI runs on every push.
+
 ## Layout
 
 ```
@@ -85,5 +93,6 @@ cmd/jobscheduler/   server binary (serve, migrate, bootstrap)
 deploy/prometheus/  Prometheus configuration, alert rules and their tests
 deploy/grafana/     Grafana dashboards and provisioning
 internal/           application packages (see LLD §1)
+loadtest/           load-test gate: k6 scenario, worker fleet, verdict (LLD §19)
 docs/               designs, ADRs, plan
 ```

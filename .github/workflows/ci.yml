@@ -25,6 +25,33 @@ jobs:
       - run: make test-race
       - run: make build
 
+  # The load-test harness at a low rate, so it keeps working (LLD §19.3).
+  loadtest-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      JS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      JS_DB_MAX_CONNS: "10"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: make loadtest-smoke
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loadtest-out
+          path: |
+            loadtest/out/*.log
+            loadtest/out/*.txt
+
   deploy-config:
     runs-on: ubuntu-latest
     steps:

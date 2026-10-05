@@ -22,6 +22,7 @@ Implements the [HLD](architecture.md). This document grows phase by phase, and e
 | [16. Payload schemas and listing details](#16-payload-schemas-and-listing-details) | 12 | Written |
 | [17. Observability](#17-observability) | 11 | Written |
 | [18. Pool backlog](#18-pool-backlog) | 11 | Written |
+| [19. Load-test gate](#19-load-test-gate) | 5 | Written |
 | Events and outbox | Later | Planned |
 
 The [HLD's open questions](architecture.md#appendix-c--open-questions-for-the-lld) are resolved in the phase that needs them: 1–5 in phase 3 (§8.1), 6 and 12 in phase 4, 7–9 in phase 8, 10 and 11 in phase 6, 13 in phase 10, 14 in phase 4.
@@ -1040,3 +1041,53 @@ Every 10 s, the pool owner:
 - **End to end:** the owner reports the target and held gauges, and records the backlog for admission.
 - **Alerts:** a `promtool` test judges backlog age against each pool's own target.
 - **Configuration:** `JS_BACKLOG_TARGET` is validated, and the removed shedding variables fail startup.
+
+## 19. Load-test gate
+
+Implements the gate of [HLD §15.1](architecture.md#151-capacity-model-tier-m) ([ADR-024](decisions/ADR-024-load-test-gate.md)): one PostgreSQL primary sustaining bursts of 5k jobs/s with p99 dispatch latency at most 1 s.
+
+### 19.1 Harness (`loadtest/`)
+
+| Part | What it does |
+|---|---|
+| `submit.js` (k6) | `ramping-arrival-rate`: `BASE_RATE` (500/s) for `WARMUP` (30 s), a 2 s ramp, `BURST_RATE` (5,000/s) for `BURST` (60 s), a 2 s ramp down, then `BASE_RATE` for `COOLDOWN` (30 s). Each iteration posts one `load.noop` job for the next tenant in turn, with a unique `Idempotency-Key` and the priority mix 2/10/68/20% (critical/high/normal/low). |
+| `worker` (Go) | One process running `-workers` SDK workers (default 40) with `-slots` each (25). Worker *i* serves pool `load-(i mod pools)` and connects to address *i* mod the engine count. Each job waits `-work` (20 ms). |
+| `gate` (Go) | Waits until the burst's steady part starts, scrapes every node's `/metrics`, waits `BURST − 10 s`, scrapes again, and judges the changes (§19.2). |
+| `run.sh` | Builds the binaries and starts PostgreSQL (unless `JS_DATABASE_URL` is set), one `api` node and two `engine` nodes. It then creates the tenants, job types and quotas, starts the worker fleet, waits until every pool has an owner, and runs k6 and the gate side by side. Output goes to `loadtest/out/`. |
+
+- **Tenants and pools:** `POOLS` tenants (4), each with job type `load.noop` in its own pool `load-<n>`. Their rate limit is raised to 1e6/s through the quotas API.
+- **Nodes:** `JS_DB_MAX_CONNS=30` per node, so 90 connections in all, as HLD §15.1 budgets.
+- **Throwaway PostgreSQL:** `initdb` from `PATH` or the test cache (`make test` fills it). Its settings are `max_connections=200`, `shared_buffers=1GB`, `max_wal_size=8GB` and `checkpoint_timeout=30min`, with `fsync` and `synchronous_commit` left on.
+
+### 19.2 Verdict
+
+The gate sums each series' change over all nodes, between the two scrapes:
+
+| Check | Passes when |
+|---|---|
+| Accepted rate | `jobs_submitted_total` rose by at least 99% of `BURST_RATE` × the window |
+| Dispatch latency (NFR-4) | At least 99% of `dispatch_latency_seconds` observations fall in the 1 s bucket |
+| Keeping up | `dispatch_latency_seconds_count` rose by at least 95% of `jobs_submitted_total` |
+
+- It also reports interpolated p50 and p99 for dispatch latency and queue wait, completions by outcome, and the p99 transaction time of each database operation.
+- It exits non-zero on failure. k6 fails the run too if more than 1% of requests fail, or if any iteration is dropped because it ran out of virtual users.
+
+### 19.3 Commands
+
+- `make loadtest`: the full gate on this machine, as a dry run. Rates and durations come from the environment variables above, and `POOLS=1` measures a single pool's ceiling.
+- The `loadtest` workflow (`gh workflow run loadtest.yml`, or the Actions tab) runs the full gate on a clean GitHub-hosted runner (4 vCPUs, 16 GB). It uses PostgreSQL 17 in Docker with the same settings, and puts the verdict in the run's summary.
+- `make loadtest-smoke`: 100 jobs/s with 10 s phases. CI runs it against a PostgreSQL service container, with the same checks.
+- k6 is pinned in `.tools` and installed by `make tools`.
+
+### 19.4 Results
+
+The run that decides is in the deployment environment (phase 13). Until then, a clean runner gives a lower bound: PostgreSQL, the platform, the workers and k6 share its CPUs. A developer machine running desktop apps gives no valid result: an 8 GB laptop that was already swapping stalled every database operation for seconds.
+
+| Date | Environment | Pools | Accepted/s | Dispatched/s | ≤ 1 s | Dispatch p99 | Verdict |
+|---|---|---|---|---|---|---|---|
+| 2026-10-05 | Apple M2 laptop, 8 GB, 13 GB of swap in use | 4 | 1,827 | 1,645 | 98.96% | 1.06 s | Invalid: memory pressure (a repeat accepted 843/s) |
+
+### 19.5 Tests
+
+- Gate: parsing the exposition format, summing changes across nodes, the exact share at a bucket bound, quantile interpolation, and each check's verdict.
+- CI runs the smoke scenario on every push.

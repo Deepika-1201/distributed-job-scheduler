@@ -1381,6 +1381,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-021](decisions/ADR-021-pool-backlog.md) | Pool backlog: dispatchable work, measured by the owner, against per-pool targets | Accepted |
 | [ADR-022](decisions/ADR-022-dispatch-latency-from-a-free-worker.md) | Dispatch latency counts from a free worker | Accepted |
 | [ADR-023](decisions/ADR-023-session-calls-fall-back-to-the-owner.md) | Worker session calls fall back to the pool owner | Accepted |
+| [ADR-024](decisions/ADR-024-load-test-gate.md) | Load-test gate: k6 submissions, an SDK worker fleet and server-side histograms | Accepted |
 
 ## Appendix C — Open questions for the LLD
 

@@ -9,9 +9,11 @@ PROTOC_GEN_GO      := v1.36.12
 PROTOC_GEN_GO_GRPC := v1.6.2
 TOOLS              := $(CURDIR)/.tools
 PROTOC_OS          := $(if $(filter Darwin,$(shell uname -s)),osx-aarch_64,linux-x86_64)
-GO_DIRS            := cmd internal pkg
+K6_VERSION         := 2.3.0
+K6_BUILD           := k6-v$(K6_VERSION)-$(if $(filter Darwin,$(shell uname -s)),macos-arm64,linux-amd64)
+GO_DIRS            := cmd internal pkg loadtest
 
-.PHONY: build test test-short test-race cover vet fmt fmt-check lint tidy run migrate up down clean tools proto demo-worker
+.PHONY: build test test-short test-race cover vet fmt fmt-check lint tidy run migrate up down clean tools proto demo-worker k6 loadtest loadtest-smoke
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="$(LDFLAGS)" -o bin/jobscheduler ./cmd/jobscheduler
@@ -66,6 +68,25 @@ tools:
 	unzip -oq "$(TOOLS)/protoc.zip" -d "$(TOOLS)/protoc" && rm "$(TOOLS)/protoc.zip"
 	GOBIN="$(TOOLS)/bin" $(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO)
 	GOBIN="$(TOOLS)/bin" $(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC)
+	$(MAKE) k6
+
+# Installs the pinned k6 into .tools unless it is already there.
+k6:
+	@if [ ! -x "$(TOOLS)/bin/k6" ]; then \
+		mkdir -p "$(TOOLS)/bin" && cd "$(TOOLS)" && \
+		if [ "$$(uname -s)" = Darwin ]; then \
+			curl -fsSL -o k6.zip https://github.com/grafana/k6/releases/download/v$(K6_VERSION)/$(K6_BUILD).zip && unzip -oq k6.zip && rm k6.zip; \
+		else \
+			curl -fsSL https://github.com/grafana/k6/releases/download/v$(K6_VERSION)/$(K6_BUILD).tar.gz | tar xz; \
+		fi && mv $(K6_BUILD)/k6 bin/k6 && rm -rf $(K6_BUILD); \
+	fi
+
+# The load-test gate (LLD §19); its settings are environment variables, see loadtest/run.sh.
+loadtest: k6
+	K6="$(TOOLS)/bin/k6" ./loadtest/run.sh
+
+loadtest-smoke: k6
+	K6="$(TOOLS)/bin/k6" BASE_RATE=50 BURST_RATE=100 WARMUP=10 BURST=20 COOLDOWN=5 WORKERS=8 SLOTS=10 ./loadtest/run.sh
 
 # Regenerates pkg/workerpb from proto/; the output is committed.
 proto:
