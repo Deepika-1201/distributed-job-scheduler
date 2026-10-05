@@ -27,6 +27,8 @@ jobs:
       BURST_RATE: ${{ inputs.burst_rate }}
       POOLS: ${{ inputs.pools }}
       API_DB_MAX_CONNS: ${{ inputs.api_conns }}
+      # The container's cgroup counts every PostgreSQL process, including backends that exited.
+      DB_CPU: docker exec pg awk '/usage_usec/ {print $2/1e6}' /sys/fs/cgroup/cpu.stat
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6

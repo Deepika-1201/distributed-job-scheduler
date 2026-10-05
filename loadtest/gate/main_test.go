@@ -122,3 +122,28 @@ dispatch_latency_seconds_bucket{pool="load-0",le="+Inf"} DIS
 }
 
 func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
+
+func TestCPUPerJobProjectsTheOfferedRate(t *testing.T) {
+	before := mustParse(t, `
+jobs_submitted_total{node="api"} 0
+process_cpu_seconds_total{node="api"} 10
+process_cpu_seconds_total{node="engine-a"} 4
+`)
+	after := mustParse(t, `
+jobs_submitted_total{node="api"} 10000
+process_cpu_seconds_total{node="api"} 30
+process_cpu_seconds_total{node="engine-a"} 9
+`)
+	r := measure(before, after, 10*time.Second, 5000)
+	r.cpu["database"] = 40
+	text := r.text()
+	for _, want := range []string{
+		"api                             2.000 ms  10.00 vCPUs", // 20 s of CPU for 10,000 jobs
+		"engine-a                        0.500 ms   2.50 vCPUs",
+		"database                        4.000 ms  20.00 vCPUs",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("report lacks %q:\n%s", want, text)
+		}
+	}
+}

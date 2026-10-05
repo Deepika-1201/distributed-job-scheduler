@@ -96,8 +96,9 @@ for _ in $(seq 100); do [[ $(owned) -ge $POOLS ]] && break; sleep 0.2; done
 
 echo "load test: $BASE_RATE/s for ${WARMUP}s, $BURST_RATE/s for ${BURST}s, $BASE_RATE/s for ${COOLDOWN}s; $POOLS pools; $WORKERS workers x $SLOTS slots"
 # The gate measures the burst's steady part: from 5 s after the ramp up to 5 s before the ramp down.
-"$OUT/bin/gate" -metrics http://localhost:19190/metrics,http://localhost:19191/metrics,http://localhost:19192/metrics \
-  -wait "$((WARMUP + 2 + 5))s" -window "$((BURST - 10))s" -rate "$BURST_RATE" >"$OUT/gate.txt" 2>&1 &
+# DB_CPU, when set, is a command printing the database's CPU seconds so far.
+"$OUT/bin/gate" -metrics api=http://localhost:19190/metrics,engine-a=http://localhost:19191/metrics,engine-b=http://localhost:19192/metrics \
+  -db-cpu "${DB_CPU:-}" -wait "$((WARMUP + 2 + 5))s" -window "$((BURST - 10))s" -rate "$BURST_RATE" >"$OUT/gate.txt" 2>&1 &
 gate=$!
 k6_status=0
 "$K6" run --quiet -e API="$API" -e KEYS="$PWD/$OUT/keys.json" -e RUN="$RUN" -e BASE_RATE="$BASE_RATE" \

@@ -1,6 +1,7 @@
 // Command gate judges the load-test gate (LLD §19.2). It scrapes every node's /metrics when the
 // burst's steady part starts and again when it ends, and checks the changes in between: the
-// accepted rate, dispatch latency (NFR-4) and whether dispatch kept up with submissions.
+// accepted rate, dispatch latency (NFR-4) and whether dispatch kept up with submissions. It also
+// reports the CPU each component spent per job, to project the capacity a rate needs.
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,29 +23,47 @@ import (
 )
 
 func main() {
-	urls := flag.String("metrics", "http://localhost:9090/metrics", "comma-separated /metrics URLs of every node")
+	urls := flag.String("metrics", "node=http://localhost:9090/metrics", "comma-separated name=URL of every node's /metrics")
+	dbCPU := flag.String("db-cpu", "", "shell command printing the database's CPU seconds so far (optional)")
 	wait := flag.Duration("wait", 37*time.Second, "time from start until the burst's steady part")
 	window := flag.Duration("window", 50*time.Second, "length of the measured part of the burst")
 	rate := flag.Float64("rate", 5000, "offered burst rate in jobs/s")
 	flag.Parse()
 
 	time.Sleep(*wait)
-	before, err := scrapeAll(strings.Split(*urls, ","))
+	before, dbBefore, err := snapshot(strings.Split(*urls, ","), *dbCPU)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gate:", err)
 		os.Exit(2)
 	}
 	time.Sleep(*window)
-	after, err := scrapeAll(strings.Split(*urls, ","))
+	after, dbAfter, err := snapshot(strings.Split(*urls, ","), *dbCPU)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gate:", err)
 		os.Exit(2)
 	}
 	r := measure(before, after, *window, *rate)
+	if *dbCPU != "" {
+		r.cpu["database"] = dbAfter - dbBefore
+	}
 	fmt.Print(r.text())
 	if !r.passed() {
 		os.Exit(1)
 	}
+}
+
+// snapshot scrapes every node and, given a command, reads the database's CPU seconds.
+func snapshot(nodes []string, dbCPU string) ([]series, float64, error) {
+	s, err := scrapeAll(nodes)
+	if err != nil || dbCPU == "" {
+		return s, 0, err
+	}
+	out, err := exec.Command("sh", "-c", dbCPU).Output()
+	if err != nil {
+		return nil, 0, fmt.Errorf("database CPU: %w", err)
+	}
+	cpu, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	return s, cpu, err
 }
 
 type series struct {
@@ -52,13 +72,21 @@ type series struct {
 	value  float64
 }
 
-func scrapeAll(urls []string) ([]series, error) {
+// scrapeAll scrapes each name=URL node, labelling its series node=name.
+func scrapeAll(nodes []string) ([]series, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	var all []series
-	for _, url := range urls {
+	for _, node := range nodes {
+		name, url, ok := strings.Cut(node, "=")
+		if !ok {
+			name, url = node, node
+		}
 		s, err := scrape(client, url)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", url, err)
+		}
+		for i := range s {
+			s[i].labels["node"] = name
 		}
 		all = append(all, s...)
 	}
@@ -241,6 +269,7 @@ type result struct {
 	completed  map[string]float64 // by state
 	txCount    map[string]float64 // by operation
 	txBuckets  map[string][]bucket
+	cpu        map[string]float64 // CPU seconds by node, and "database" when measured
 }
 
 func measure(before, after []series, window time.Duration, offered float64) result {
@@ -252,6 +281,7 @@ func measure(before, after []series, window time.Duration, offered float64) resu
 		completed:  change(before, after, "jobs_completed_total", "state"),
 		txCount:    change(before, after, "db_transaction_duration_seconds_count", "operation"),
 		txBuckets:  map[string][]bucket{},
+		cpu:        change(before, after, "process_cpu_seconds_total", "node"),
 	}
 	byOp := map[string]map[string]float64{}
 	for k, n := range change(before, after, "db_transaction_duration_seconds_bucket", "operation", "le") {
@@ -319,6 +349,18 @@ func (r result) text() string {
 	b.WriteString("  database transactions (per second, p99):\n")
 	for _, op := range ops[:min(len(ops), 8)] {
 		fmt.Fprintf(&b, "    %-28s %8.0f/s  %s\n", op, r.txCount[op]/r.window.Seconds(), seconds(quantile(0.99, r.txBuckets[op])))
+	}
+	if r.accepted > 0 && len(r.cpu) > 0 {
+		fmt.Fprintf(&b, "  CPU per accepted job, and vCPUs needed at %.0f jobs/s:\n", r.offered)
+		nodes := make([]string, 0, len(r.cpu))
+		for n := range r.cpu {
+			nodes = append(nodes, n)
+		}
+		slices.Sort(nodes)
+		for _, n := range nodes {
+			per := r.cpu[n] / r.accepted
+			fmt.Fprintf(&b, "    %-28s %8.3f ms  %5.2f vCPUs\n", n, 1000*per, per*r.offered)
+		}
 	}
 	verdict := "FAIL"
 	if r.passed() {
