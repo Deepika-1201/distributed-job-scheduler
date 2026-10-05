@@ -195,7 +195,8 @@ func TestJobOutcomesEndToEnd(t *testing.T) {
 		t.Errorf("result = %s", job.Result)
 	}
 	c.await(flakyJob, domain.StateSucceeded, 15*time.Second)
-	if a := c.attempts(flakyJob); len(a) != 2 || a[0].State != domain.AttemptFailed || a[0].Error != "smtp unavailable" || a[1].Number != 2 {
+	// A release before delivery (T23) uses up an attempt number, so only the order is fixed.
+	if a := c.attempts(flakyJob); len(a) != 2 || a[0].State != domain.AttemptFailed || a[0].Error != "smtp unavailable" || a[1].Number <= a[0].Number {
 		t.Errorf("flaky attempts = %+v", a)
 	}
 	if job := c.await(permanent, domain.StateFailed, 10*time.Second); job.Reason != domain.ReasonNonRetryable {

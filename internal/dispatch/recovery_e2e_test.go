@@ -78,8 +78,10 @@ func TestCrashedWorkersJobIsRetriedElsewhere(t *testing.T) {
 	})
 	c.await(id, domain.StateSucceeded, 20*time.Second)
 	attempts := c.attempts(id)
+	// An assignment released before delivery (T23) uses up its number without a row, so the
+	// retry's number is only known to be higher.
 	if len(attempts) != 2 || attempts[0].State != domain.AttemptLost || attempts[0].Actor != domain.ActorReaper ||
-		attempts[1].State != domain.AttemptSucceeded || attempts[1].Number != 2 {
-		t.Errorf("attempts = %+v, want LOST by the reaper, then SUCCEEDED as attempt 2", attempts)
+		attempts[1].State != domain.AttemptSucceeded || attempts[1].Number <= attempts[0].Number {
+		t.Errorf("attempts = %+v, want LOST by the reaper, then a later attempt SUCCEEDED", attempts)
 	}
 }
