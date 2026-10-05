@@ -952,7 +952,7 @@ Each scenario lists detection, recovery, consistency, duplicate execution, corru
 | Timer store | Up to 10M rows | Indexed by `run_at`; mostly idle. |
 | History (30 days) | 300M–1.5B job rows, plus attempts | Hundreds of GB up to 1–2 TB, dominated by payloads. Time-partitioned. Payloads may be kept for less time than metadata (LLD). |
 
-**Load-test gate.** Before anything beyond the core is built, a walking skeleton must show one PostgreSQL primary sustaining 5k jobs/s bursts with p99 dispatch ≤ 1 s. If it can't, the architecture is revisited before further investment.
+**Load-test gate.** Before anything beyond the core is built, a walking skeleton must show one PostgreSQL primary sustaining 5k jobs/s bursts with p99 dispatch ≤ 1 s. If it can't, the architecture is revisited before further investment. The harness measured each job's CPU at about 1.5–1.65 ms on the database, 0.5 ms on `api` and 0.75 ms on the engines together. So 5k jobs/s needs a primary with about 8 vCPUs free for bursts, and the gate is decided in the deployment environment ([LLD §19.4](low-level-design.md#194-results)).
 
 ### 15.2 Backpressure and admission control
 

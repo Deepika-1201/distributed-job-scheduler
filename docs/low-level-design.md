@@ -1070,6 +1070,7 @@ The gate sums each series' change over all nodes, between the two scrapes:
 | Keeping up | `dispatch_latency_seconds_count` rose by at least 95% of `jobs_submitted_total` |
 
 - It also reports interpolated p50 and p99 for dispatch latency and queue wait, completions by outcome, and the p99 transaction time of each database operation.
+- **CPU per job:** each node's `process_cpu_seconds_total`, and the database's CPU when `DB_CPU` names a command that prints it. Each is divided by the jobs accepted and projected to the offered rate. A run on one machine is CPU-bound well below 5,000 jobs/s, so these costs are what carries over to a deployment.
 - It exits non-zero on failure. k6 fails the run too if more than 1% of requests fail, or if any iteration is dropped because it ran out of virtual users.
 
 ### 19.3 Commands
@@ -1086,8 +1087,25 @@ The run that decides is in the deployment environment (phase 13). Until then, a 
 | Date | Environment | Pools | Accepted/s | Dispatched/s | ≤ 1 s | Dispatch p99 | Verdict |
 |---|---|---|---|---|---|---|---|
 | 2026-10-05 | Apple M2 laptop, 8 GB, 13 GB of swap in use | 4 | 1,827 | 1,645 | 98.96% | 1.06 s | Invalid: memory pressure (a repeat accepted 843/s) |
+| 2026-10-05 | GitHub runner, 4 vCPUs, 15 GB; PostgreSQL on the OS disk behind Docker's port proxy | 4 | 1,082 | 953 | 96.36% | 2.09 s | Fail: flushes queued on the IOPS-limited disk, and `docker-proxy` used up to 92% of a CPU |
+| 2026-10-05 | The same runner; PostgreSQL on local SSD (about 10,000 fsyncs/s), host networking | 4 | 1,173 | 1,121 | 99.96% | 935 ms | Fail: CPU-bound. A 120-connection api pool accepted 2,601/s but starved dispatch (868/s). |
+| 2026-10-05 | The same, offering 1,000 jobs/s | 4 | 1,004 | 1,003 | 100% | 96 ms | Pass |
+| 2026-10-05 | The same, offering 800 jobs/s | 4 | 804 | 804 | 100% | 98 ms | Pass |
+
+**Capacity per job.** The runner runs every component on 4 vCPUs. At the rates it sustains, each job cost this much CPU:
+
+| Component | CPU per job | vCPUs at 5,000 jobs/s |
+|---|---|---|
+| PostgreSQL | 1.5–1.65 ms | 8 |
+| `api` | 0.45–0.55 ms | 2.5 |
+| `engine` (both) | 0.75 ms | 3.8 |
+
+- The run saturated at about 1,200 jobs/s, as these costs predict for 4 shared vCPUs. Dispatch latency held under 1 s whenever the engines had CPU.
+- The architecture therefore needs a primary with about 8 vCPUs free for bursts, for example an 8–16 vCPU class. `api` and `engine` nodes scale out.
+- The database's cost is per transaction rather than per byte: a job writes about 4 KB of WAL and takes three transactions, at about 0.55 ms of CPU each. Batching those transactions, as HLD §15.1 anticipates, is the lever if a smaller class is wanted.
+- The gate is decided in the deployment environment, where the database, nodes and load generator run on separate machines (phase 13).
 
 ### 19.5 Tests
 
-- Gate: parsing the exposition format, summing changes across nodes, the exact share at a bucket bound, quantile interpolation, and each check's verdict.
+- Gate: parsing the exposition format, summing changes across nodes, the exact share at a bucket bound, quantile interpolation, each check's verdict, and the CPU projection.
 - CI runs the smoke scenario on every push.

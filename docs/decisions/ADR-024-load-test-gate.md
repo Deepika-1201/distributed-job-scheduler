@@ -86,3 +86,11 @@
 ## Revisit when
 
 - The deciding run fails. Batching, as HLD §15.1 anticipates, is the first lever before the architecture is revisited.
+
+## Outcome (2026-10-05)
+
+- **Laptop:** the first run was invalid because of memory pressure.
+- **Runner, first attempts:** they exposed two artifacts of the test setup, an IOPS-limited OS disk and Docker's userland port proxy. The workflow now puts PostgreSQL on local SSD with host networking.
+- **Runner, final setup:** it sustains about 1,200 jobs/s with every component sharing 4 vCPUs. At 800 and 1,000 jobs/s the gate passes, with dispatch p99 under 100 ms.
+- **Per-job cost:** PostgreSQL 1.5–1.65 ms of CPU, `api` 0.45–0.55 ms and the engines together 0.75 ms. So 5,000 jobs/s needs about 8 vCPUs of database headroom; [LLD §19.4](../low-level-design.md#194-results) has the details.
+- **Verdict:** the architecture stands, with the primary sized for that headroom. The gate itself is decided in the deployment environment.
