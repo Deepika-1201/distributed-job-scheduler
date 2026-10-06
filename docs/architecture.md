@@ -569,7 +569,7 @@ sequenceDiagram
 
 - **Lag budget:** promoter interval (≤ 250 ms) + promotion transaction + dispatcher pickup (~100 ms), which is well under 1 s.
 - Because schedules are materialized up to 2.5 min ahead, a spike at 00:00:00 costs batched state updates, not inserts plus schedule evaluation at the same instant. The extra half minute puts the materialization of fires at whole minutes at the half minute, so it never coincides with a boundary ([ADR-032](decisions/ADR-032-materialize-between-cron-boundaries.md)).
-- **Measured** ([LLD §23](low-level-design.md#23-capacity)): on a 4-vCPU test runner, 5,000 schedules firing at the same minute had a p99 lag of 0.49 s, and 10,000 a p99 of 2.5 s.
+- **Measured** ([LLD §23](low-level-design.md#23-capacity)): on a 4-vCPU test runner, 5,000 schedules firing at the same minute had a p99 lag of 0.5 s, and 10,000 a p99 of 2.5 s.
 - A herd much larger than tier M's bursts, such as 100k schedules at the same second, takes a few seconds to promote. Such a herd mostly turns into *queue wait* anyway, since only about 10k slots exist. Priority and capacity govern queue wait. Jitter windows are the recommended mitigation.
 - **LLD decision:** keep the promotion step (a small hot `READY` set and explicit metrics), or let the dispatcher claim due jobs directly (no promotion writes). See [Appendix C](#appendix-c--open-questions-for-the-lld).
 
@@ -1351,8 +1351,8 @@ The same image and environment variables run under `docker compose` and on ECS.
 | GPU / resource-aware scheduling | Worker capacity labels plus job resource requests; bin-packing in the dispatcher's selection step | Dispatcher only |
 | Weighted fair share | Deficit round-robin across tenants in the dispatcher's selection step | Dispatcher only |
 | Per-key concurrency and rate limits | Key counters in the dispatcher's selection step | Dispatcher only |
-| New due-work strategy (for example, a timing wheel) | `DueWorkSource` port | Engine only |
-| New queue or storage backend | Repository ports | New adapter |
+| New due-work strategy (for example, a timing wheel) | The scheduling loops' `scheduling.Store` port (materialize, expire, promote) | Engine only |
+| New queue or storage backend | Ports exist for the scheduling, recovery and coordination loops. The API and dispatcher use the PostgreSQL store directly, so their interfaces are extracted first ([PRR](production-readiness-review.md) F5). | Interfaces, then a new adapter |
 | Batch and data pipelines | Workflows plus payloads passed by reference | Depends on workflows |
 | Geographic scheduling | Pools per region plus region labels | Multi-region (major) |
 
@@ -1392,7 +1392,7 @@ The same image and environment variables run under `docker compose` and on ECS.
 | [ADR-030](decisions/ADR-030-ecs-on-fargate.md) | Container runtime: ECS on Fargate | Accepted |
 | [ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md) | Heartbeats stay one transaction each; renewals are not batched | Accepted |
 | [ADR-032](decisions/ADR-032-materialize-between-cron-boundaries.md) | Materialize 2.5 minutes ahead, between cron boundaries | Accepted |
-| [ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md) | Promoters take each schedule by its earliest due run | Accepted |
+| [ADR-033](decisions/ADR-033-a-schedule-is-decided-by-whoever-holds-all-its-due-runs.md) | A schedule's due runs are decided by whoever holds all of them | Accepted |
 
 ## Appendix C — Open questions for the LLD
 

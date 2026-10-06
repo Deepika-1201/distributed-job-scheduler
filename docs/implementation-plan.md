@@ -23,9 +23,9 @@ Builds the design in [architecture.md](architecture.md) incrementally. Each phas
 | 14 | Load testing and tuning | Tier M scenarios | Capacity report against NFR-1 to NFR-4 | Done (LLD §23): cron-boundary, future-dated, 200-worker and single-pool scenarios. The tuning:
 - dispatch rounds stop issuing an empty claim per typed waiter, which cut claims by 77–80% and database CPU per job from 1.8 to 1.0 ms;
 - materialization moves off cron boundaries ([ADR-032](decisions/ADR-032-materialize-between-cron-boundaries.md));
-- concurrent promoters take each schedule by its earliest due run, so they can't split its overlap decisions ([ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md));
-- heartbeats stay unbatched ([ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md)).<br>On a 4-vCPU runner, NFR-3 holds at 5,000 fires per boundary (p99 0.49 s) and NFR-4 at 200 workers (p99 0.2 s). 5k jobs/s bursts project to an 8-vCPU primary; that run needs the phase 13 environment. |
-| 15 | Production readiness review | Checklist from the original brief (§39) | Review passed | |
+- a schedule's due runs are decided only by a promoter holding all of them, so concurrent promoters can't split its overlap decisions ([ADR-033](decisions/ADR-033-a-schedule-is-decided-by-whoever-holds-all-its-due-runs.md));
+- heartbeats stay unbatched ([ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md)).<br>On a 4-vCPU runner, NFR-3 holds at 5,000 fires per boundary (p99 0.5 s) and NFR-4 at 200 workers (p99 0.2 s). 5k jobs/s bursts project to an 8-vCPU primary; that run needs the phase 13 environment. |
+| 15 | Production readiness review | Checklist from the original brief (§39) | Review passed | Done ([review](production-readiness-review.md)): passed with conditions. The three conditions need an AWS account: create the environment and roll back once, run the 5k jobs/s gate on the proposed database class, and drill a failover. Findings F1–F3 were fixed in phase 14; F4–F9 are accepted or deferred with a trigger. |
 | Later | Extensions | Outbox and first consumer (webhooks), DAG workflows, HTTP and container executors, fair share | Per-feature ADRs | |
 
 ## Changes from the original phase list

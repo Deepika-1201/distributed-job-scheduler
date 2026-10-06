@@ -2,7 +2,7 @@
 
 A distributed job scheduling and execution platform: durable jobs that run now, later or on a recurring schedule, with at-least-once execution, retries, priorities and fair sharing across tenants, on a horizontally scalable worker fleet.
 
-**Status:** phases 0–14 of the [implementation plan](docs/implementation-plan.md) are done. Phase 13's AWS environment is built and validated in CI, and creating it needs an AWS account. The work covers: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies), coordination (epoch-fenced leases with self-fencing) and the worker system (gRPC [protocol](proto/jobscheduler/worker/v1/worker.proto), dispatcher with weighted priorities and tenant caps, [Go SDK](pkg/workersdk), demo worker), recovery (reaper with warm-up, engine-side timeouts, retention and partition maintenance, bulk cancel and re-drive), observability (Prometheus metrics, OpenTelemetry traces linked from submission to execution, alert rules), security hardening (per-pool worker tokens, API key rotation, TLS, a least-privilege database role, a route-wide tenant-isolation test, vulnerability and image scanning), and failure testing (a fault-injection suite covering HLD scenarios S1–S14; workers ride out database failovers without losing running jobs), deployment (Terraform for ECS on Fargate with RDS, a manual deploy workflow, runbooks for every alert), and load testing (tier M scenarios and the tuning they led to). Every V1 functional requirement is implemented. That includes platform administration (worker drain, pool and job-type pause), tenant quotas with priority-aware load shedding, and payload JSON Schemas.
+**Status:** phases 0–15 of the [implementation plan](docs/implementation-plan.md) are done. The [production readiness review](docs/production-readiness-review.md) passed with three conditions, all of which need an AWS account. Phase 13's AWS environment is built and validated in CI. The work covers: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies), coordination (epoch-fenced leases with self-fencing) and the worker system (gRPC [protocol](proto/jobscheduler/worker/v1/worker.proto), dispatcher with weighted priorities and tenant caps, [Go SDK](pkg/workersdk), demo worker), recovery (reaper with warm-up, engine-side timeouts, retention and partition maintenance, bulk cancel and re-drive), observability (Prometheus metrics, OpenTelemetry traces linked from submission to execution, alert rules), security hardening (per-pool worker tokens, API key rotation, TLS, a least-privilege database role, a route-wide tenant-isolation test, vulnerability and image scanning), and failure testing (a fault-injection suite covering HLD scenarios S1–S14; workers ride out database failovers without losing running jobs), deployment (Terraform for ECS on Fargate with RDS, a manual deploy workflow, runbooks for every alert), and load testing (tier M scenarios and the tuning they led to). Every V1 functional requirement is implemented. That includes platform administration (worker drain, pool and job-type pause), tenant quotas with priority-aware load shedding, and payload JSON Schemas.
 
 ## Documentation
 
@@ -13,6 +13,7 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 | [Decision records](docs/decisions/) | ADR-001 to ADR-033, one decision per file |
 | [Runbooks](docs/runbooks/) | One per alert, plus rollback, failover drill, restore and credential rotation |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
+| [Production readiness review](docs/production-readiness-review.md) | The original brief's checklist, answered with evidence; conditions for launch |
 
 ## Quick start
 
@@ -111,7 +112,7 @@ On a 4-vCPU GitHub runner, with PostgreSQL, the nodes, the workers and k6 sharin
 | Scenario | Result |
 |---|---|
 | 1,000 jobs/s burst | Dispatch p99 136 ms; 1.0 ms of database CPU per job |
-| 5,000 schedules firing at the same minute | Scheduling lag p99 488 ms |
+| 5,000 schedules firing at the same minute | Scheduling lag p99 496 ms |
 | 200 workers, about 10,000 jobs running | Dispatch p99 200 ms |
 
 So 5,000 jobs/s needs an 8-vCPU primary, and the deciding run happens in the deployment environment.

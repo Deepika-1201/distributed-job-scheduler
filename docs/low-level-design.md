@@ -526,15 +526,15 @@ Every engine node runs one every 250 ms, and continuously while any step fills i
 |---|---|---|
 | Expire | Due `SCHEDULED` jobs and `READY` jobs whose `start_deadline` has passed and that have never started (1,000) | → `EXPIRED` (T18, T19) |
 | Promote | Due `RETRY_PENDING` jobs, and due `SCHEDULED` jobs without a schedule (1,000) | → `READY` (T3, T4) in one `UPDATE` |
-| Schedule jobs | Due `SCHEDULED` jobs with a schedule: up to 500 schedules by their earliest due run, plus up to 500 of their later due runs, with each schedule's overlap policy | See below |
+| Schedule jobs | Due `SCHEDULED` jobs with a schedule (500), with each schedule's overlap policy | See below |
 
 For schedule jobs, "an earlier run is active" means an earlier-fire job of the same schedule is `READY`, `RUNNING` or `RETRY_PENDING`. The batch is processed in `(schedule_id, fire_time)` order, and jobs promoted earlier in the batch count as active.
 
-- **Heads** ([ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md)): a batch locks schedules by their head, the due `SCHEDULED` run with no earlier due `SCHEDULED` run of the same schedule. It takes heads in `run_at` order with `SKIP LOCKED`. When there are heads, a second statement locks their later due runs, one index range per head.
-  - Concurrent batches never split a schedule's decisions, since only the head's holder decides them.
-  - Heads never wait behind another run, so every batch progresses, even when jitter sorts a later fire first.
-  - Idle polls cost one index probe.
-- **Counts:** the earlier active and waiting runs are counted once per head, for the locked heads only, in one pass over `jobs_schedule_idx`.
+- **Who decides** ([ADR-033](decisions/ADR-033-a-schedule-is-decided-by-whoever-holds-all-its-due-runs.md)): a schedule's due runs are decided only by a transaction that holds all of them, so concurrent batches never split one.
+  - **Gaps:** a schedule has a gap when one of its batch jobs has an earlier due `SCHEDULED` run outside the batch, held by another promoter or sorted later by jitter.
+  - **Completing a gap:** a second statement locks the schedule's other due runs with `SKIP LOCKED` and counts its due runs in the same snapshot. If the batch now holds all of them, the schedule is decided in fire order. If not, its runs are left `SCHEDULED` for a later batch.
+  - **Cost:** ordinary boundaries have no gaps and take one statement.
+- **Counts:** the batch query locks the due jobs first. It then counts each locked job's earlier runs that are active, waiting, and waiting and due, in one pass over `jobs_schedule_idx`.
 
 | Overlap policy | Earlier run active | Otherwise |
 |---|---|---|
@@ -1291,7 +1291,7 @@ The fault tests found four gaps between the HLD and the code.
 | S11 Leader crashes | `TestEngineCrashHandsPoolsOver` (sessions stay `ACTIVE` across the takeover), `TestManagerSelfFencesBeforeTakeover`, `TestPoolOwnershipHandsOverWhenTheOwnerStops` | Automated |
 | S12 Network partition | `TestEnginePartitionedFromTheDatabase`: the cut-off owner stops dispatching before another node takes over, new jobs flow through the new owner, and the cut-off node's worker finishes its job without a second attempt. Worker and client partitions: S4, S8. | Automated |
 | S13 Clock drift | Correctness uses the database clock; `TestClockOffset` checks the offset metric. Large jumps on the database host are an alerting concern. | Automated (metric); drift itself manual |
-| S14 100× load | `TestPerTenantRateLimit`, `TestQuotasAreEnforced`, `TestOverloadedPoolShedsLowThenNormal`; throughput is phase 14 | Automated; capacity in phase 14 |
+| S14 100× load | `TestPerTenantRateLimit`, `TestQuotasAreEnforced`, `TestOverloadedPoolShedsLowThenNormal`; capacity measured in §23 | Automated; capacity in §23 |
 
 ### 21.4 Timing values
 
@@ -1489,8 +1489,8 @@ Phase 14: tier M scenarios against NFR-1 to NFR-4 ([HLD §5](architecture.md#5-n
    - *After:* about 0.03 ms a job.
 4. **Concurrent promoters could break overlap policies.** Found while reviewing the promoter: two batches could split one schedule's due runs.
    - *First fix:* deferring the split runs. Its own test showed it could stall, when a batch filled with runs waiting on a lock or on a later-sorted earlier fire.
-   - *Final fix:* batches take each schedule by its earliest due run ([ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md)).
-   - *Plan trap:* its one-statement draft failed NFR-3 again (run 37494983993, p99 2.3 s). PostgreSQL's cached generic plan scanned a whole index on every idle poll. The shipped form uses two statements with index-driven laterals; locally it costs the same as the original promoter, 0.2 ms an idle poll and 55 ms for 5,000 fires with two promoters.
+   - *Second fix:* selecting schedules by their earliest due run. It was correct, but on the runner its `NOT EXISTS` per due row cost 9–27 ms a call, and NFR-3 failed twice (runs 37494983993, 37497395434). One reason was a cached generic plan that scanned a whole index on every idle poll.
+   - *Final fix:* the original `run_at` batch. Where a schedule has a gap, its other due runs are locked too, and the schedule is decided only if all of them are held ([ADR-033](decisions/ADR-033-a-schedule-is-decided-by-whoever-holds-all-its-due-runs.md)). Locally it costs what the original promoter did: 0.2 ms an idle poll, and 45–60 ms for 5,000 fires with two promoters.
 
    This is a correctness fix, not a speed one.
 5. **Heartbeats don't need batching.** Measured at about 1.9 ms of database time per heartbeat: 0.08 vCPU for 200 workers ([ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md)).
@@ -1508,14 +1508,14 @@ Before tuning (commit `1ed05bf`):
 | 37482283692 | Burst 1,000/s after seeding 300,000 future jobs | NFR-2, NFR-4 | Dispatch p99 98 ms; 1.26 ms of database CPU per job | Pass |
 | 37482299386 | 200 workers × 60 slots, 10 s jobs | NFR-2, NFR-4 | 87.27% ≤ 1 s, p99 2.42 s | Fail |
 
-After tuning (commit `2956bea`):
+After tuning (commit `2956bea`; the cron rows are from `049a30e`, with the final promoter of ADR-033):
 
 | Run | Scenario | NFR | Measured | Verdict |
 |---|---|---|---|---|
 | 37491292387 | Burst 1,000/s | NFR-4 | Dispatch p99 136 ms, queue wait p99 196 ms | Pass |
 | 37492235086 | Burst 2,000/s | NFR-1 | Accepted 1,186/s, the same CPU ceiling; dispatch p99 781 ms | Fail (runner) |
-| 37491236953 | Cron, 5,000 schedules | NFR-3 | 100% ≤ 1 s, p50 194 ms, p99 488 ms; dispatch p99 750 ms | Pass |
-| 37491261678 | Cron, 10,000 schedules | NFR-3 | 56.67% ≤ 1 s, p99 2.47 s | Fail; twice tier M's largest burst |
+| 37499810545 | Cron, 5,000 schedules | NFR-3 | 100% ≤ 1 s, p50 313 ms, p99 496 ms; dispatch p99 398 ms; 1.0 ms of database CPU per job | Pass |
+| 37499827499 | Cron, 10,000 schedules | NFR-3 | 60% ≤ 1 s, p99 2.46 s | Fail; twice tier M's largest burst |
 | 37491249332 | 200 workers × 60 slots, 10 s jobs | NFR-2, NFR-4 | Dispatch p99 200 ms, queue wait p99 359 ms | Pass |
 | 37492256545 | One pool, 1,000/s | NFR-4 | Dispatch p99 91 ms | Pass |
 
@@ -1530,12 +1530,12 @@ CPU per job below saturation, after tuning (runs 37491292387 and 37491249332):
 | `engine`, both nodes | 0.4–0.5 ms | 2–2.5 |
 
 - **Database:** a primary with 8 vCPUs carries 5,000 jobs/s at about 65% CPU. That leaves headroom for maintenance and a failover's catch-up. The proposed production class is therefore 8 vCPUs, the low end of §19.4's earlier 8–16 estimate. In the deployment environment, set `db_instance_class = "db.m7g.2xlarge"` for the deciding run. The default `db.t4g.medium` serves functional environments only.
-- **Schedule jobs** cost about 1.8 ms of database CPU each in the cron runs:
+- **Promotion throughput** on the runner: two engines promoted a boundary's 5,000 due jobs within about 0.5 s, and 10,000 within about 2.5 s, while dispatching them. Tier M's bursts are 2–5k.
+- **Schedule jobs** cost about 1.0 ms of database CPU each in the final 5,000-schedule run, and 1.6–1.8 ms in runs where the runner saturated:
   - materialization, about 0.3 ms;
   - promotion, about 0.15 ms;
   - claim and completion;
   - fixed background work (heartbeats, gauges, leases), which weighs more because those runs average only 83 jobs/s.
-- **Promotion throughput** on the runner: two engines promoted a boundary's 5,000 due jobs within about 0.5 s, and 10,000 within about 2.5 s, while dispatching them. Tier M's bursts are 2–5k.
 - **Timer store:** 300,000 future-dated rows left dispatch and database cost unchanged, because promotion reads `jobs_due_idx` from its due edge only. 10M rows were not seeded; they cost storage, not per-job work.
 - **Heartbeats:** 0.08 vCPU per 200 workers ([ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md)).
 
@@ -1545,8 +1545,8 @@ CPU per job below saturation, after tuning (runs 37491292387 and 37491249332):
 |---|---|---|---|
 | NFR-1 | 115–580 jobs/s on average, bursts of 2–5k/s | 1,000 jobs/s sustained with every component on 4 vCPUs. 5,000/s projects to an 8-vCPU primary with `api` and engines scaled out. | Average met. The burst run that decides needs the deployment environment (§22). |
 | NFR-2 | ~10k running jobs, 200 workers, ~100k schedules, 10M future jobs | 10,000 running on 200 workers, dispatch p99 200 ms; 10,000 schedules firing together; 300,000 future jobs with no effect | Met where measured. 100k schedules and 10M future jobs are extrapolated from per-row costs. |
-| NFR-3 | Scheduling lag p99 ≤ 1 s | 5,000 fires at one boundary: p99 488 ms | Met at tier M's burst size |
-| NFR-4 | Dispatch latency p99 ≤ 1 s | 91–200 ms for bursts, 1 pool and 200 workers; 750 ms during a 5,000-fire boundary | Met |
+| NFR-3 | Scheduling lag p99 ≤ 1 s | 5,000 fires at one boundary: p99 496 ms | Met at tier M's burst size |
+| NFR-4 | Dispatch latency p99 ≤ 1 s | 91–200 ms for bursts, 1 pool and 200 workers; 398 ms during a 5,000-fire boundary | Met |
 
 ### 23.7 Limits and next steps
 
@@ -1554,7 +1554,7 @@ CPU per job below saturation, after tuning (runs 37491292387 and 37491249332):
 - **10,000 fires at one boundary** take about 2.5 s to promote on the runner, against tier M bursts of 2–5k. The levers, in order:
   1. jitter windows on such schedules ([HLD §11.6](architecture.md#116-precision-and-the-top-of-the-minute-spike));
   2. more engine nodes;
-  3. parallel promoter batches within a node, safe since [ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md).
+  3. parallel promoter batches within a node, safe since [ADR-033](decisions/ADR-033-a-schedule-is-decided-by-whoever-holds-all-its-due-runs.md).
 - **Schedule creation per tenant is serialized** by the quota check's tenant lock. With 32 concurrent clients on one tenant, each create took 18 ms including the wait. Creation is not a hot path. A bulk-create endpoint would be the fix if it became one.
 - **One pool's dispatcher** sustained 1,000 jobs/s with a p99 of 91 ms, and the runner can't offer more. [HLD §15.3](architecture.md#153-scaling-each-tier) keeps leased pool partitions as the next step past one owner.
 
