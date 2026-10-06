@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Runs the load-test gate (LLD §19) on this machine: PostgreSQL, one api node, two engine
-# nodes and the worker fleet, then k6 and the gate side by side. Output goes to loadtest/out/.
+# Runs the load-test gate (LLD §19, §23) on this machine: PostgreSQL, one api node, two engine
+# nodes and the worker fleet, then a scenario and the gate side by side. Output goes to loadtest/out/.
+#   SCENARIO=burst  submissions at BASE_RATE, then BURST_RATE (NFR-1, NFR-4)
+#   SCENARIO=cron   SCHEDULES schedules firing at every minute boundary (NFR-3)
+#   FUTURE=N        first seeds N jobs due in a day (NFR-2's future-dated backlog, scaled down)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OUT=loadtest/out
+SCENARIO=${SCENARIO:-burst}
+SCHEDULES=${SCHEDULES:-5000}
+FUTURE=${FUTURE:-0}
 POOLS=${POOLS:-4}
 BASE_RATE=${BASE_RATE:-500}
 BURST_RATE=${BURST_RATE:-5000}
@@ -94,14 +100,36 @@ owned() { curl -sf "$API/v1/pools" -H "Authorization: Bearer $(key "$OUT/admin.j
 for _ in $(seq 100); do [[ $(owned) -ge $POOLS ]] && break; sleep 0.2; done
 [[ $(owned) -ge $POOLS ]] || { echo "pools have no owner; see $OUT/*.log" >&2; exit 2; }
 
+k6env=(-e API="$API" -e KEYS="$PWD/$OUT/keys.json" -e RUN="$RUN")
+if ((FUTURE > 0)); then
+  echo "seeding $FUTURE jobs due in a day"
+  "$K6" run --quiet "${k6env[@]}" -e COUNT="$FUTURE" loadtest/seed.js 2>&1 | tee "$OUT/seed.txt"
+fi
+METRICS=api=http://localhost:19190/metrics,engine-a=http://localhost:19191/metrics,engine-b=http://localhost:19192/metrics
+
+if [[ $SCENARIO == cron ]]; then
+  echo "load test: $SCHEDULES schedules firing every minute; $POOLS pools; $WORKERS workers x $SLOTS slots"
+  "$K6" run --quiet "${k6env[@]}" -e COUNT="$SCHEDULES" loadtest/schedules.js 2>&1 | tee "$OUT/schedules.txt"
+  # Measure three minute boundaries from half past a minute, at least 40 s away so every fire
+  # in the window has been materialized; promotions then never straddle the window's edges.
+  wait=$((30 - $(date +%s) % 60))
+  while ((wait < 40)); do wait=$((wait + 60)); done
+  gate_status=0
+  "$OUT/bin/gate" -scenario cron -schedules "$SCHEDULES" -metrics "$METRICS" -db-cpu "${DB_CPU:-}" \
+    -wait "${wait}s" -window 180s >"$OUT/gate.txt" 2>&1 || gate_status=$?
+  cat "$OUT/gate.txt"
+  ((gate_status == 0)) || { echo "load test FAILED (gate exit $gate_status); logs in $OUT/" >&2; exit 1; }
+  exit 0
+fi
+
 echo "load test: $BASE_RATE/s for ${WARMUP}s, $BURST_RATE/s for ${BURST}s, $BASE_RATE/s for ${COOLDOWN}s; $POOLS pools; $WORKERS workers x $SLOTS slots"
 # The gate measures the burst's steady part: from 5 s after the ramp up to 5 s before the ramp down.
 # DB_CPU, when set, is a command printing the database's CPU seconds so far.
-"$OUT/bin/gate" -metrics api=http://localhost:19190/metrics,engine-a=http://localhost:19191/metrics,engine-b=http://localhost:19192/metrics \
+"$OUT/bin/gate" -metrics "$METRICS" \
   -db-cpu "${DB_CPU:-}" -wait "$((WARMUP + 2 + 5))s" -window "$((BURST - 10))s" -rate "$BURST_RATE" >"$OUT/gate.txt" 2>&1 &
 gate=$!
 k6_status=0
-"$K6" run --quiet -e API="$API" -e KEYS="$PWD/$OUT/keys.json" -e RUN="$RUN" -e BASE_RATE="$BASE_RATE" \
+"$K6" run --quiet "${k6env[@]}" -e BASE_RATE="$BASE_RATE" \
   -e BURST_RATE="$BURST_RATE" -e WARMUP="$WARMUP" -e BURST="$BURST" -e COOLDOWN="$COOLDOWN" \
   loadtest/submit.js 2>&1 | tee "$OUT/k6.txt" || k6_status=$?
 gate_status=0

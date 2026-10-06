@@ -123,6 +123,61 @@ dispatch_latency_seconds_bucket{pool="load-0",le="+Inf"} DIS
 
 func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
 
+func TestMinuteBoundaries(t *testing.T) {
+	at := func(s string) time.Time {
+		v, err := time.Parse(time.TimeOnly, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	for _, tc := range []struct {
+		from, to string
+		want     int
+	}{
+		{"10:00:30", "10:03:30", 3},
+		{"10:00:30", "10:00:59", 0},
+		{"10:00:59", "10:01:00", 1},
+		{"10:01:00", "10:01:30", 0},
+	} {
+		if got := minuteBoundaries(at(tc.from), at(tc.to)); got != tc.want {
+			t.Errorf("minuteBoundaries(%s, %s) = %d, want %d", tc.from, tc.to, got, tc.want)
+		}
+	}
+}
+
+// The cron scenario passes when every schedule fired at every boundary with p99 lag <= 1 s
+// (NFR-3), and the fires were dispatched promptly (LLD §23).
+func TestCronVerdict(t *testing.T) {
+	scrape := func(promoted, lagUnderOne, dispatched float64) []series {
+		return mustParse(t, strings.NewReplacer("PRO", ftoa(promoted), "LAG1", ftoa(lagUnderOne), "DIS", ftoa(dispatched)).Replace(`
+scheduling_lag_seconds_count{pool="load-0"} PRO
+scheduling_lag_seconds_bucket{pool="load-0",le="1"} LAG1
+scheduling_lag_seconds_bucket{pool="load-0",le="+Inf"} PRO
+dispatch_latency_seconds_count{pool="load-0"} DIS
+dispatch_latency_seconds_bucket{pool="load-0",le="1"} DIS
+dispatch_latency_seconds_bucket{pool="load-0",le="+Inf"} DIS
+`))
+	}
+	zero := scrape(0, 0, 0)
+	for _, tc := range []struct {
+		name                            string
+		promoted, lagUnderOne, dispatch float64
+		pass                            bool
+	}{
+		{"all good", 15000, 14900, 15000, true},
+		{"missed fires", 14000, 14000, 14000, false},
+		{"slow promotion", 15000, 14000, 15000, false},
+		{"dispatch fell behind", 15000, 15000, 13000, false},
+	} {
+		r := measure(zero, scrape(tc.promoted, tc.lagUnderOne, tc.dispatch), 3*time.Minute, 0)
+		r.schedules, r.boundaries = 5000, 3
+		if got := r.passed(); got != tc.pass {
+			t.Errorf("%s: passed = %v, want %v\n%s", tc.name, got, tc.pass, r.text())
+		}
+	}
+}
+
 func TestCPUPerJobProjectsTheOfferedRate(t *testing.T) {
 	before := mustParse(t, `
 jobs_submitted_total{node="api"} 0

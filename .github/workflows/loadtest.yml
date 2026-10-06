@@ -1,13 +1,33 @@
 name: loadtest
 
-# The load-test gate (LLD §19) on a clean runner: run it from the Actions tab or with
+# The load-test gate (LLD §19, §23) on a clean runner: run it from the Actions tab or with
 # `gh workflow run loadtest.yml`.
 on:
   workflow_dispatch:
     inputs:
+      scenario:
+        description: burst (NFR-1, NFR-4) or cron (NFR-3)
+        type: choice
+        options: [burst, cron]
+        default: burst
       burst_rate:
         description: Burst rate in jobs/s
         default: "5000"
+      schedules:
+        description: For cron, schedules firing every minute
+        default: "5000"
+      future:
+        description: Jobs due in a day, seeded first
+        default: "0"
+      workers:
+        description: Workers (NFR-2 sizes the fleet at 200)
+        default: "40"
+      slots:
+        description: Slots per worker
+        default: "25"
+      work:
+        description: How long each job runs (10s at 1000 jobs/s keeps 10,000 running)
+        default: 20ms
       pools:
         description: Pools (1 measures a single pool's ceiling)
         default: "4"
@@ -21,10 +41,16 @@ permissions:
 jobs:
   gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       JS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      SCENARIO: ${{ inputs.scenario }}
       BURST_RATE: ${{ inputs.burst_rate }}
+      SCHEDULES: ${{ inputs.schedules }}
+      FUTURE: ${{ inputs.future }}
+      WORKERS: ${{ inputs.workers }}
+      SLOTS: ${{ inputs.slots }}
+      WORK: ${{ inputs.work }}
       POOLS: ${{ inputs.pools }}
       API_DB_MAX_CONNS: ${{ inputs.api_conns }}
       # The container's cgroup counts every PostgreSQL process, including backends that exited.
@@ -48,14 +74,14 @@ jobs:
         run: |
           echo "$(nproc) CPUs, $(free -g | awk '/Mem:/ {print $2}') GB memory; $(docker exec pg postgres --version)" | tee -a "$GITHUB_STEP_SUMMARY"
           docker exec pg pg_test_fsync -s 2 -f /var/lib/postgresql/data/fsync.test | grep -A6 "one 8kB write" | grep ops/sec | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Run the gate, sampling CPU and database waits during the burst
+      - name: Run the gate, sampling CPU and database waits along the way
         run: |
-          (sleep 50; for _ in 1 2 3 4; do
+          (sleep 40; for _ in $(seq 14); do
             echo "== $(date +%T) CPU by process"; top -b -n 1 -w 200 | sed -n '8,20p'
             echo "-- active database sessions by wait"
             docker exec pg psql -U postgres -AtF ' ' -c "SELECT coalesce(wait_event_type, 'CPU'), coalesce(wait_event, '-'), count(*)
               FROM pg_stat_activity WHERE backend_type = 'client backend' AND state <> 'idle' GROUP BY 1, 2 ORDER BY 3 DESC"
-            sleep 5
+            sleep 20
           done) > /tmp/diag.txt 2>&1 &
           make loadtest
       - if: always()
@@ -65,7 +91,9 @@ jobs:
           docker exec pg psql -U postgres -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements' >/dev/null
           docker exec pg psql -U postgres -c "SELECT calls, round(total_exec_time) AS total_ms, round(mean_exec_time::numeric, 3) AS mean_ms,
             left(regexp_replace(query, '\s+', ' ', 'g'), 110) AS query
-            FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 15"
+            FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 25"
+          docker exec pg psql -U postgres -AtF ' ' -c "SELECT relname, n_live_tup, n_dead_tup, pg_size_pretty(pg_total_relation_size(relid))
+            FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 8"
           docker exec pg psql -U postgres -AtF ' ' -c "SELECT 'wal_bytes', wal_bytes, 'wal_fpi', wal_fpi, 'wal_records', wal_records FROM pg_stat_wal"
       - if: always()
         run: |
