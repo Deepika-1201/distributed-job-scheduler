@@ -57,7 +57,7 @@ jobs:
       DB_CPU: docker exec pg awk '/usage_usec/ {print $2/1e6}' /sys/fs/cgroup/cpu.stat
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       # Like a database server: data on the runner's local SSD (/mnt; the OS disk is
