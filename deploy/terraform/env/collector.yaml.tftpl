@@ -1,0 +1,62 @@
+# The collector sidecar in each api and engine task (LLD §22.6).
+extensions:
+  sigv4auth:
+    region: ${region}
+    service: aps
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: jobscheduler
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["127.0.0.1:9090"]
+              labels:
+                instance: $${env:HOSTNAME}
+                environment: ${environment}
+                role: ${role}
+
+processors:
+  batch: {}
+  filter/backlog:
+    metrics:
+      include:
+        match_type: strict
+        metric_names: [jobs_oldest_ready_age_seconds]
+
+exporters:
+  awsxray:
+    region: ${region}
+  prometheusremotewrite:
+    endpoint: ${remote_write}
+    auth:
+      authenticator: sigv4auth
+  awsemf:
+    region: ${region}
+    namespace: JobScheduler
+    log_group_name: ${emf_log_group}
+    dimension_rollup_option: NoDimensionRollup
+    metric_declarations:
+      - dimensions: [[pool]]
+        metric_name_selectors: [jobs_oldest_ready_age_seconds]
+
+service:
+  extensions: [sigv4auth]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [awsxray]
+    metrics:
+      receivers: [prometheus]
+      processors: [batch]
+      exporters: [prometheusremotewrite]
+    metrics/backlog:
+      receivers: [prometheus]
+      processors: [filter/backlog, batch]
+      exporters: [awsemf]

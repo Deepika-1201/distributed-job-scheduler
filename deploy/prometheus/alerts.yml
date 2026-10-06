@@ -12,6 +12,7 @@ groups:
         annotations:
           summary: "Pool {{ $labels.pool }}: p99 scheduling lag is {{ $value | humanizeDuration }}"
           description: Due jobs take more than 1 s to become READY (NFR-3). Check the promoter and database latency.
+          runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/scheduling-lag-slo.md
 
       - alert: BacklogAge
         # Each pool's own target (PUT /v1/pools/{name}/settings), or JS_BACKLOG_TARGET (ADR-021).
@@ -22,6 +23,7 @@ groups:
         annotations:
           summary: "Pool {{ $labels.pool }}: oldest dispatchable job has waited {{ $value | humanizeDuration }}, past its target"
           description: Workers are not keeping up, or the pool has none. Scale the pool's workers. Held work (jobs_held) doesn't count.
+          runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/backlog-age.md
 
       - alert: DispatchStalled
         # Dispatchable work and free slots, but nothing handed out. Paused and capped work is
@@ -36,6 +38,7 @@ groups:
         annotations:
           summary: "Pool {{ $labels.pool }} has READY jobs and free slots but dispatches nothing"
           description: Check the pool owner's logs, and the job types the free workers run.
+          runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/dispatch-stalled.md
 
       - alert: NoPoolOwner
         expr: max(pools_unowned) > 0
@@ -45,6 +48,7 @@ groups:
         annotations:
           summary: "{{ $value }} pool(s) with workers or READY jobs have no owner"
           description: No engine holds the pool lease, so its jobs are not dispatched or measured. Check engine health and lease renewal.
+          runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/no-pool-owner.md
 
       - alert: DeadLetterSpike
         expr: |
@@ -56,6 +60,7 @@ groups:
         annotations:
           summary: "Job type {{ $labels.type }}: dead letters at over 3x the daily rate"
           description: Inspect the dead-lettered jobs' last errors; retry them once the cause is fixed.
+          runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/dead-letter-spike.md
 
       - alert: SessionExpirySpike
         expr: sum by (pool) (increase(worker_sessions_expired_total[5m])) > 10
@@ -64,6 +69,7 @@ groups:
         annotations:
           summary: "Pool {{ $labels.pool }}: {{ $value }} worker sessions expired in 5 minutes"
           description: Workers are crashing or cannot reach the engine (fleet or network problem).
+          runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/session-expiry-spike.md
 
       - alert: ZombieReports
         expr: sum by (pool) (increase(stale_completions_rejected_total[10m])) > 5
@@ -72,6 +78,7 @@ groups:
         annotations:
           summary: "Pool {{ $labels.pool }}: workers report attempts that are no longer theirs"
           description: Workers keep running after losing their session, e.g. from long pauses or partitions. Their reports are rejected safely.
+          runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/zombie-reports.md
 
       - alert: APIErrors
         expr: |
@@ -83,6 +90,7 @@ groups:
         annotations:
           summary: "API 5xx ratio is {{ $value | humanizePercentage }}"
           description: Check the API logs by trace_id, and database health.
+          runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/api-errors.md
 
       - alert: DatabaseConnectionsSaturated
         expr: max by (instance, role) (db_pool_in_use / db_pool_max) > 0.9
@@ -92,6 +100,7 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} uses {{ $value | humanizePercentage }} of its database connections"
           description: Slow queries or too small a pool (JS_DB_MAX_CONNS); compare db_transaction_duration_seconds by operation.
+          runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/database-connections-saturated.md
 
       - alert: ClockOffset
         expr: max by (instance) (abs(db_clock_offset_seconds)) > 0.5
@@ -101,3 +110,4 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} clock is {{ $value | humanizeDuration }} off the database"
           description: Leases and deadlines use the database clock, but local timeouts use this node's; fix NTP on the node.
+          runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/clock-offset.md

@@ -1,6 +1,6 @@
 # ADR-010: Deployment strategy
 
-- **Status:** Accepted in part. The container runtime is pending Technology Selection.
+- **Status:** Accepted. The container runtime was decided in [ADR-030](ADR-030-ecs-on-fargate.md): ECS on Fargate.
 - **Date:** 2026-09-26
 - **Related:** [HLD §18](../architecture.md#18-deployment-architecture), [ADR-004](ADR-004-database.md), [ADR-009](ADR-009-modular-monolith.md)
 

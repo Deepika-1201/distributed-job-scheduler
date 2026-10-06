@@ -39,6 +39,16 @@ func (r *Reloader) Config() *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: r.GetCertificate}
 }
 
+// FromPEM returns a server configuration for TLS 1.2 and later with a fixed key pair, for
+// certificates passed in the environment rather than as files (LLD §22.3).
+func FromPEM(certPEM, keyPEM []byte) (*tls.Config, error) {
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS key pair: %w", err)
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}, nil
+}
+
 // GetCertificate returns the current certificate, reloading it first if the files changed
 // since the last check, at most every 30 s. A pair that fails to load leaves the previous one in use.
 func (r *Reloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {

@@ -25,6 +25,7 @@ Implements the [HLD](architecture.md). This document grows phase by phase, and e
 | [19. Load-test gate](#19-load-test-gate) | 5 | Written |
 | [20. Security hardening](#20-security-hardening) | 12 | Written |
 | [21. Failure testing](#21-failure-testing) | 10 | Written |
+| [22. Deployment](#22-deployment) | 13 | Written |
 | Events and outbox | Later | Planned |
 
 The [HLD's open questions](architecture.md#appendix-c--open-questions-for-the-lld) are resolved in the phase that needs them: 1–5 in phase 3 (§8.1), 6 and 12 in phase 4, 7–9 in phase 8, 10 and 11 in phase 6, 13 in phase 10, 14 in phase 4.
@@ -124,6 +125,8 @@ If a component fails, shutdown starts immediately at step 2, skipping the delay.
 | `JS_SHUTDOWN_DELAY` | `0s` | Time to keep serving after a signal while readiness fails; set to about 5 s behind a load balancer |
 | `JS_SHUTDOWN_TIMEOUT` | `30s` | Maximum time for each component to stop |
 | `JS_TLS_CERT_FILE` / `JS_TLS_KEY_FILE` | empty | PEM certificate and key, both or neither; turn on TLS for the API and worker servers, reloaded when the files change (§20.3) |
+| `JS_TLS_CERT` / `JS_TLS_KEY` | empty | The same as PEM text, both or neither, not combined with the files; not reloaded (§22.3) |
+| `JS_RUNTIME_DB_ROLE` / `JS_RUNTIME_DB_PASSWORD` | empty | For `migrate`: the login role to create in `jobscheduler_runtime`, and its password (≥ 16 characters), both or neither (§22.5) |
 
 ## 3. Domain model
 
@@ -1315,3 +1318,117 @@ These resolve HLD open question 13. Tests run them scaled down, and the relation
 - **API:** `TestDatabaseOutageAnswers503`, for a cut and a stalled database.
 - **End to end:** the S1, S6 (cut and stall, which also checks the engine's explanations and headroom) and S12 tests of §21.3.
 - **The tests catch the bugs:** with the outage tolerance set to nothing, the S6 test's handlers are cancelled and the S12 test's job runs twice.
+
+## 22. Deployment
+
+Phase 13: [HLD §18](architecture.md#18-deployment-architecture) on AWS, with ECS on Fargate ([ADR-030](decisions/ADR-030-ecs-on-fargate.md)).
+
+### 22.1 Terraform layout
+
+| Root | Holds | Run by |
+|---|---|---|
+| `deploy/terraform/bootstrap` | S3 state bucket (versioned, encrypted, native locking); GitHub OIDC provider; the deploy role, trusted only by this repository's `deploy` environment | An administrator, once per AWS account |
+| `deploy/terraform/env` | One environment, named by `var.name`; state at `env/<name>.tfstate` | The deploy workflow (§22.7) |
+
+The environment root composes three modules plus root-level resources:
+
+- `modules/network`: a VPC over two availability zones, with public and private subnets, and one NAT gateway (`nat_per_az = true` for one per zone);
+- `modules/database`: RDS PostgreSQL 17, Multi-AZ, gp3, encrypted, 7 days of point-in-time recovery, deletion protection unless `ephemeral`, with the master password managed by RDS in Secrets Manager;
+- `modules/service`: an ECS service with its task definition, log group, collector sidecar and optional target groups, used for `api`, `engine` and each worker pool;
+- in the root: ECR repositories, the Network Load Balancer, TLS material, secrets, the Prometheus workspace and alert rules, and autoscaling.
+
+### 22.2 Services
+
+| Service | Tasks | Command | Ports | Notes |
+|---|---|---|---|---|
+| `api` | 2\u20136, on CPU (60%) | `serve`, `JS_ROLES=api` | 8080 TLS, 9090 ops | NLB port 443 \u2192 8080 |
+| `engine` | 2 | `serve`, `JS_ROLES=engine` | 7070 TLS, 9090 ops | NLB port 7070 \u2192 7070. A 60 s stop timeout lets it hand over its leases. |
+| `worker-<pool>` | 1\u2013N, on backlog age | the pool's image | 9090 ops | Stop timeout is the pool's drain time. `demo` runs `demo-worker`. |
+| `migrate` | one-off | `migrate` | \u2014 | Runs before every rollout (\u00a722.5) |
+
+- **Placement:** private subnets, `awsvpc` networking, one security group per role. Only the load balancer and the engines reach 7070; only the load balancer reaches 8080; only the services reach the database.
+- **Health:** the target groups check `GET /livez` on port 9090, and ECS replaces tasks that fail it. Readiness isn't used: during a database outage it fails everywhere, and replacing every task would add a restart storm to the outage (HLD §18.3). Draining relies on deregistration, which ECS starts before `SIGTERM`.
+- **Advertise address:** when `JS_WORKER_ADVERTISE_ADDR` is unset, an engine advertises its first non-loopback IPv4 address and its worker port. On Fargate that is the task's address, so redirects reach the right task.
+
+### 22.3 TLS
+
+- Terraform's `tls` provider creates a private CA, and a server certificate signed by it whose SANs are the load balancer's DNS name, `api.<name>.internal` and `engine.<name>.internal`.
+- The certificate and key reach the tasks as PEM in `JS_TLS_CERT` and `JS_TLS_KEY`, from Secrets Manager: ECS injects secrets as variables, not files. These are an alternative to `JS_TLS_CERT_FILE`/`JS_TLS_KEY_FILE` and are not reloaded; a new certificate means new tasks.
+- Workers trust the CA and verify the server name `engine.<name>.internal` (`-tls-server-name` in `demo-worker`). Redirects point at task IP addresses, which no certificate could list in advance.
+- The database is reached with `sslmode=verify-full`, against the RDS CA bundle the image carries at `/etc/ssl/certs/rds-global-bundle.pem`.
+
+### 22.4 Secrets
+
+| Secret | Created by | Used by |
+|---|---|---|
+| Master credentials | RDS (`manage_master_user_password`) | `migrate`, as `PGPASSWORD` |
+| Runtime role password | Terraform (`random_password`) | `migrate` (`JS_RUNTIME_DB_PASSWORD`), `api` and `engine` (`PGPASSWORD`) |
+| Cluster worker token | Terraform (`random_password`) | `engine` and the demo pool. Production pools get per-pool tokens through the API (ADR-025). |
+| TLS certificate and key | Terraform | `api` and `engine` |
+
+- `JS_DATABASE_URL` carries no password: pgx reads `PGPASSWORD` from the environment.
+- The task execution role may read only these secrets.
+- Secrets are encrypted with a KMS key the environment owns.
+
+### 22.5 Migrations and the runtime role
+
+The deploy workflow runs `jobscheduler migrate` as a one-off task with the master credentials.
+
+1. Migrations apply, including 00012's `jobscheduler_runtime` group role ([ADR-027](decisions/ADR-027-least-privilege-database-roles.md)).
+2. With `JS_RUNTIME_DB_ROLE` and `JS_RUNTIME_DB_PASSWORD` set, `migrate` creates the login role if it is missing, grants it `jobscheduler_runtime`, and sets its password.
+   - The password is sent as a SCRAM-SHA-256 verifier computed in the process, so neither the database's statement logs nor its activity views ever see it in clear.
+   - Both settings must be given together.
+
+`api` and `engine` then connect as that login role.
+
+### 22.6 Telemetry
+
+Each `api` and `engine` task runs an AWS Distro for OpenTelemetry collector as a sidecar:
+
+- **Traces:** the platform exports OTLP to `localhost:4317`, and the collector sends them to X-Ray.
+- **Metrics:** the collector scrapes `localhost:9090/metrics` every 15 s.
+  - Everything is remote-written to an Amazon Managed Service for Prometheus workspace, which evaluates `deploy/prometheus/alerts.yml` as is and routes alerts to an SNS topic.
+  - The backlog gauges also go to CloudWatch as embedded metric format, namespace `JobScheduler`, for autoscaling.
+- **Logs:** JSON on stdout, to CloudWatch Logs through the `awslogs` driver, kept 30 days.
+- **Dashboards:** the Grafana dashboards in `deploy/grafana` work against the Prometheus workspace from any Grafana.
+
+### 22.7 Pipelines
+
+- **CI** (`ci.yml`) runs `terraform fmt -check` and `terraform validate` on both roots.
+- **Deploy** (`deploy.yml`) is manual, with inputs `name` and `action` (`apply` or `destroy`). It runs in the GitHub `deploy` environment, which can require a reviewer, and assumes the deploy role through OIDC (repository variables `AWS_DEPLOY_ROLE_ARN`, `AWS_REGION` and `TF_STATE_BUCKET`).
+  - **Apply:**
+    1. create the ECR repositories;
+    2. build and push both images, tagged with the commit;
+    3. apply the environment with that tag;
+    4. run `migrate` and fail on a non-zero exit;
+    5. update every service to the new task definitions and wait until they are stable;
+    6. check that every target is healthy.
+  - **Destroy:** `terraform destroy`. With `ephemeral = true`, the default, the database has no deletion protection and no final snapshot.
+
+### 22.8 Runbooks
+
+`docs/runbooks/` has one runbook per alert in `deploy/prometheus/alerts.yml`, and each alert links to it through its `runbook_url` annotation. It also has procedures for:
+
+- rolling back;
+- a database failover drill;
+- restoring from a snapshot or a point in time;
+- rotating credentials.
+
+### 22.9 Cost
+
+An idle environment costs about $0.35 an hour in `us-east-1`:
+
+- RDS `db.t4g.medium` Multi-AZ, about $0.13;
+- one NAT gateway, about $0.05;
+- the load balancer, about $0.03;
+- five Fargate tasks with sidecars at 0.5 vCPU and 1 GB each, about $0.12;
+- the rest is small: Prometheus samples, logs, secrets and KMS.
+
+Destroying the environment stops all of it except the state bucket.
+
+### 22.10 Tests
+
+- **Configuration:** PEM TLS variables (and that they can't be combined with the file ones), the runtime role variables (both or neither), and the advertise address default.
+- **Store:** `EnsureLoginRole` creates a member of `jobscheduler_runtime` that can log in with its password and is idempotent. The password appears nowhere in the statements sent.
+- **TLS:** a server configured from PEM variables serves the certificate.
+- **CI:** `terraform validate` on both roots and `docker build` of both images, which the image scan already runs.

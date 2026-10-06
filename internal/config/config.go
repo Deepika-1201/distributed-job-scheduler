@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -54,13 +55,16 @@ type Telemetry struct {
 	SampleRatio  float64
 }
 
-// TLS turns on TLS for the API and worker servers when both files are set (ADR-026).
+// TLS turns on TLS for the API and worker servers (ADR-026): from files, reloaded when they
+// change, or from PEM in the environment, as ECS injects secrets (LLD §22.3).
 type TLS struct {
 	CertFile string
 	KeyFile  string
+	CertPEM  string
+	KeyPEM   string
 }
 
-func (t TLS) Enabled() bool { return t.CertFile != "" }
+func (t TLS) Enabled() bool { return t.CertFile != "" || t.CertPEM != "" }
 
 // Engine configures the worker protocol served by engine nodes (LLD §12).
 type Engine struct {
@@ -88,6 +92,10 @@ func (a API) NodeRateLimit() float64 { return a.TenantRateLimit / float64(a.Repl
 type Database struct {
 	URL      string
 	MaxConns int32
+	// RuntimeRole and RuntimePassword, used by migrate, name the login role the nodes connect as;
+	// migrate makes it a member of jobscheduler_runtime (LLD §22.5).
+	RuntimeRole     string
+	RuntimePassword string
 }
 
 type Log struct {
@@ -109,8 +117,10 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 			MinScheduleInterval: p.duration("JS_MIN_SCHEDULE_INTERVAL", time.Minute),
 		},
 		Database: Database{
-			URL:      p.required("JS_DATABASE_URL"),
-			MaxConns: int32(p.intInRange("JS_DB_MAX_CONNS", 10, 1, 1000)),
+			URL:             p.required("JS_DATABASE_URL"),
+			MaxConns:        int32(p.intInRange("JS_DB_MAX_CONNS", 10, 1, 1000)),
+			RuntimeRole:     p.str("JS_RUNTIME_DB_ROLE", ""),
+			RuntimePassword: p.str("JS_RUNTIME_DB_PASSWORD", ""),
 		},
 		Log: Log{
 			Level:  p.logLevel("JS_LOG_LEVEL", slog.LevelInfo),
@@ -124,10 +134,25 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		BacklogTarget:   p.duration("JS_BACKLOG_TARGET", 5*time.Minute),
 		ShutdownDelay:   p.duration("JS_SHUTDOWN_DELAY", 0),
 		ShutdownTimeout: p.duration("JS_SHUTDOWN_TIMEOUT", 30*time.Second),
-		TLS:             TLS{CertFile: p.str("JS_TLS_CERT_FILE", ""), KeyFile: p.str("JS_TLS_KEY_FILE", "")},
+		TLS: TLS{CertFile: p.str("JS_TLS_CERT_FILE", ""), KeyFile: p.str("JS_TLS_KEY_FILE", ""),
+			CertPEM: p.str("JS_TLS_CERT", ""), KeyPEM: p.str("JS_TLS_KEY", "")},
 	}
 	if (cfg.TLS.CertFile == "") != (cfg.TLS.KeyFile == "") {
 		p.fail("JS_TLS_CERT_FILE", "must be set together with JS_TLS_KEY_FILE")
+	}
+	if (cfg.TLS.CertPEM == "") != (cfg.TLS.KeyPEM == "") {
+		p.fail("JS_TLS_CERT", "must be set together with JS_TLS_KEY")
+	}
+	if cfg.TLS.CertFile != "" && cfg.TLS.CertPEM != "" {
+		p.fail("JS_TLS_CERT", "cannot be combined with JS_TLS_CERT_FILE")
+	}
+	switch db := cfg.Database; {
+	case (db.RuntimeRole == "") != (db.RuntimePassword == ""):
+		p.fail("JS_RUNTIME_DB_ROLE", "must be set together with JS_RUNTIME_DB_PASSWORD")
+	case db.RuntimeRole != "" && !roleName.MatchString(db.RuntimeRole):
+		p.fail("JS_RUNTIME_DB_ROLE", "must match %s", roleName)
+	case db.RuntimeRole != "" && len(db.RuntimePassword) < 16:
+		p.fail("JS_RUNTIME_DB_PASSWORD", "must be at least 16 characters")
 	}
 	if cfg.Roles.Has(RoleEngine) {
 		cfg.Engine = Engine{
@@ -176,6 +201,8 @@ type parser struct {
 	lookup func(string) (string, bool)
 	errs   []error
 }
+
+var roleName = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 
 // defaultNodeID is the hostname plus a random suffix, so a restarted process never reuses
 // its predecessor's lease identity.

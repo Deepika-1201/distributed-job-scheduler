@@ -40,13 +40,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: docker build -t jobscheduler:ci .
+      - run: docker build -t jobscheduler:ci . && docker build --target demo-worker -t demo-worker:ci .
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: jobscheduler:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: demo-worker:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  # Formats and validates the Terraform roots, without an AWS account (LLD §22.7).
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: make tf-check
 
   # The load-test harness at a low rate, so it keeps working (LLD §19.3).
   loadtest-smoke:

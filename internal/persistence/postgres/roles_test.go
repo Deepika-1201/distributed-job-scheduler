@@ -81,3 +81,56 @@ func TestRuntimeRoleRunsThePlatformWithoutOwnerRights(t *testing.T) {
 		t.Error("audit_log is empty after an audited action")
 	}
 }
+
+// migrate's runtime login role: a member of jobscheduler_runtime that logs in with its password,
+// which reaches the database only as a SCRAM verifier (LLD §22.5).
+func TestEnsureLoginRole(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	role := "js_app_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	t.Cleanup(func() { f.exec(`DROP ROLE IF EXISTS ` + role) })
+	connect := func(password string) error {
+		u, err := url.Parse(f.pool.Config().ConnString())
+		if err != nil {
+			t.Fatal(err)
+		}
+		u.User = url.UserPassword(role, password)
+		pool, err := NewPool(ctx, u.String(), 1)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		var member bool
+		if err := pool.QueryRow(ctx, `SELECT pg_has_role(current_user, 'jobscheduler_runtime', 'member')`).Scan(&member); err != nil {
+			return err
+		}
+		if !member {
+			return errors.New("not a member of jobscheduler_runtime")
+		}
+		return nil
+	}
+
+	const first, second = "first-password-0123456789", "second-password-0123456789"
+	if err := EnsureLoginRole(ctx, f.pool, role, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := connect(first); err != nil {
+		t.Fatalf("logging in as the new role: %v", err)
+	}
+	if err := EnsureLoginRole(ctx, f.pool, role, second); err != nil {
+		t.Fatalf("running again: %v", err)
+	}
+	if err := connect(second); err != nil {
+		t.Errorf("logging in with the new password: %v", err)
+	}
+	if err := connect(first); err == nil {
+		t.Error("the old password still works")
+	}
+	var stored string
+	if err := f.pool.QueryRow(ctx, `SELECT rolpassword FROM pg_authid WHERE rolname = $1`, role).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(stored, "SCRAM-SHA-256$4096:") || strings.Contains(stored, second) {
+		t.Errorf("stored password %q, want a SCRAM verifier", stored)
+	}
+}

@@ -6,3 +6,8 @@
 *.out
 coverage.*
 .env
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.example.tfvars

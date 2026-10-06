@@ -26,6 +26,7 @@ tests:
             exp_annotations:
               summary: "Pool stuck has READY jobs and free slots but dispatches nothing"
               description: "Check the pool owner's logs, and the job types the free workers run."
+              runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/dispatch-stalled.md
 
   - name: backlog age is judged against each pool's own target
     interval: 1m
@@ -48,6 +49,7 @@ tests:
             exp_annotations:
               summary: "Pool web: oldest dispatchable job has waited 6m 40s, past its target"
               description: "Workers are not keeping up, or the pool has none. Scale the pool's workers. Held work (jobs_held) doesn't count."
+              runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/backlog-age.md
 
   - name: an unowned pool pages after 30 seconds
     interval: 15s
@@ -66,6 +68,7 @@ tests:
             exp_annotations:
               summary: "1 pool(s) with workers or READY jobs have no owner"
               description: "No engine holds the pool lease, so its jobs are not dispatched or measured. Check engine health and lease renewal."
+              runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/no-pool-owner.md
 
   - name: scheduling lag over 1 s at p99 for 10 minutes
     interval: 1m
@@ -84,6 +87,7 @@ tests:
             exp_annotations:
               summary: "Pool slow: p99 scheduling lag is 2.485s"
               description: "Due jobs take more than 1 s to become READY (NFR-3). Check the promoter and database latency."
+              runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/scheduling-lag-slo.md
 
   - name: API 5xx ratio above 1%
     interval: 1m
@@ -100,3 +104,4 @@ tests:
             exp_annotations:
               summary: "API 5xx ratio is 5%"
               description: "Check the API logs by trace_id, and database health."
+              runbook_url: https://github.com/Deepika-1201/distributed-job-scheduler/blob/main/docs/runbooks/api-errors.md

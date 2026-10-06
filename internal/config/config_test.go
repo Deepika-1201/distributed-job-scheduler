@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
@@ -216,5 +217,37 @@ func TestLoadNeverEchoesDatabaseURL(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "s3cret") {
 		t.Errorf("error leaks database credentials: %v", err)
+	}
+}
+
+// PEM TLS variables and the runtime login role (LLD §22.3, §22.5).
+func TestLoadDeploymentSettings(t *testing.T) {
+	db := func(m map[string]string) map[string]string {
+		m["JS_DATABASE_URL"] = "postgres://db/jobs"
+		return m
+	}
+	cfg, err := Load(env(db(map[string]string{"JS_TLS_CERT": "-----BEGIN CERTIFICATE-----", "JS_TLS_KEY": "pem-key-secret",
+		"JS_RUNTIME_DB_ROLE": "jobscheduler_app", "JS_RUNTIME_DB_PASSWORD": "0123456789abcdef-db"})))
+	if err != nil || !cfg.TLS.Enabled() || cfg.TLS.KeyPEM != "pem-key-secret" || cfg.Database.RuntimeRole != "jobscheduler_app" {
+		t.Errorf("Load = %+v, %v", cfg, err)
+	}
+	for vars, want := range map[string]string{
+		`{"JS_TLS_CERT": "x"}`: "JS_TLS_CERT: must be set together with JS_TLS_KEY",
+		`{"JS_TLS_CERT": "x", "JS_TLS_KEY": "pem-key-secret", "JS_TLS_CERT_FILE": "/c", "JS_TLS_KEY_FILE": "/k"}`: "cannot be combined",
+		`{"JS_RUNTIME_DB_ROLE": "app"}`: "JS_RUNTIME_DB_ROLE: must be set together with JS_RUNTIME_DB_PASSWORD",
+		`{"JS_RUNTIME_DB_ROLE": "App; DROP", "JS_RUNTIME_DB_PASSWORD": "0123456789abcdef-db"}`: "JS_RUNTIME_DB_ROLE: must match",
+		`{"JS_RUNTIME_DB_ROLE": "app", "JS_RUNTIME_DB_PASSWORD": "short-db-secret"}`:           "JS_RUNTIME_DB_PASSWORD: must be at least 16",
+	} {
+		m := map[string]string{}
+		if err := json.Unmarshal([]byte(vars), &m); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(env(db(m)))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: error %v, want %q", vars, err, want)
+		}
+		if err != nil && (strings.Contains(err.Error(), "pem-key-secret") || strings.Contains(err.Error(), "db-secret")) {
+			t.Errorf("%s: error echoes a secret: %v", vars, err)
+		}
 	}
 }

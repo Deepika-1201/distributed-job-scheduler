@@ -1169,7 +1169,7 @@ Docker Compose runs the OpenTelemetry Collector, Prometheus, Tempo, Loki and Gra
 
 ## 18. Deployment architecture
 
-Decision record: [ADR-010](decisions/ADR-010-deployment-strategy.md). Whether containers run on EKS or ECS on Fargate is decided at Technology Selection; nothing below depends on that choice.
+Decision records: [ADR-010](decisions/ADR-010-deployment-strategy.md), and [ADR-030](decisions/ADR-030-ecs-on-fargate.md) for the runtime: ECS on Fargate. The implementation is in [LLD §22](low-level-design.md#22-deployment).
 
 ### 18.1 Production topology
 
@@ -1219,7 +1219,7 @@ flowchart TB
 | PostgreSQL | Managed, Multi-AZ with synchronous standby | Automated backups, point-in-time recovery, encryption, parameters tuned for queue workloads |
 | Secrets | AWS Secrets Manager and KMS | Injected at runtime, never baked into images |
 | Images | ECR: one image for `api` / `engine` (selected by a role flag), one per worker pool | Scanned and signed in CI |
-| Telemetry | OTel Collector, then a managed or self-hosted Prometheus/Grafana stack | Decided at Technology Selection |
+| Telemetry | AWS Distro for OpenTelemetry collector sidecars; Amazon Managed Service for Prometheus, X-Ray, CloudWatch Logs | Decided in [ADR-030](decisions/ADR-030-ecs-on-fargate.md) |
 | Infrastructure as code | Terraform for everything | Environments created and destroyed on demand |
 
 ### 18.3 Health checks
@@ -1242,7 +1242,7 @@ flowchart TB
 
 ### 18.5 Autoscaling
 
-- **Workers:** per pool, on `jobs_oldest_ready_age_seconds` and slot utilization. On EKS that means KEDA with a Prometheus scaler; on ECS, target tracking on a custom metric.
+- **Workers:** per pool, on `jobs_oldest_ready_age_seconds`: ECS target tracking on the CloudWatch copy of the metric that the collector publishes ([ADR-030](decisions/ADR-030-ecs-on-fargate.md)).
 - **`api`:** CPU and request rate.
 - **`engine`:** a small fixed count (2–3), increased as pools per node or dispatch rate per node grows.
 - **Database:** manual vertical scaling, plus storage autoscaling.
@@ -1268,7 +1268,7 @@ flowchart TB
 - a demo worker pool with sample handlers (sleep, fail N times, simulated HTTP call);
 - the observability stack from [§17.6](#176-local-stack).
 
-If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes manifests.
+The same image and environment variables run under `docker compose` and on ECS.
 
 ## 19. Architecture alternatives
 
@@ -1368,7 +1368,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-007](decisions/ADR-007-execution-semantics.md) | Job execution semantics | Accepted |
 | [ADR-008](decisions/ADR-008-retry-strategy.md) | Retry strategy | Accepted |
 | [ADR-009](decisions/ADR-009-modular-monolith.md) | Modular monolith vs microservices | Accepted |
-| [ADR-010](decisions/ADR-010-deployment-strategy.md) | Deployment strategy | Accepted in part (runtime pending) |
+| [ADR-010](decisions/ADR-010-deployment-strategy.md) | Deployment strategy | Accepted; runtime decided by ADR-030 |
 | [ADR-011](decisions/ADR-011-caching-and-redis.md) | Caching and Redis | Accepted |
 | [ADR-012](decisions/ADR-012-language-and-core-libraries.md) | Language and core libraries | Accepted; amended by ADR-013 and ADR-014 |
 | [ADR-013](decisions/ADR-013-cron-evaluation.md) | Cron evaluation with explicit DST rules | Accepted |
@@ -1388,6 +1388,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-027](decisions/ADR-027-least-privilege-database-roles.md) | Least-privilege database roles | Accepted |
 | [ADR-028](decisions/ADR-028-row-level-security.md) | Row-level security is not adopted in V1 | Accepted |
 | [ADR-029](decisions/ADR-029-riding-out-database-outages.md) | Workers ride out database outages; session expiry needs evidence | Accepted |
+| [ADR-030](decisions/ADR-030-ecs-on-fargate.md) | Container runtime: ECS on Fargate | Accepted |
 
 ## Appendix C — Open questions for the LLD
 

@@ -15,3 +15,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  - package-ecosystem: terraform
+    directories: [/deploy/terraform/env, /deploy/terraform/bootstrap]
+    schedule:
+      interval: weekly

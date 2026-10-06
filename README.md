@@ -10,7 +10,8 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 |---|---|
 | [High-level design](docs/architecture.md) | Requirements, architecture, failure scenarios, deployment |
 | [Low-level design](docs/low-level-design.md) | Code structure, state machines, algorithms (grows each phase) |
-| [Decision records](docs/decisions/) | ADR-001 to ADR-029, one decision per file |
+| [Decision records](docs/decisions/) | ADR-001 to ADR-030, one decision per file |
+| [Runbooks](docs/runbooks/) | One per alert, plus rollback, failover drill, restore and credential rotation |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
 
 ## Quick start
@@ -53,7 +54,7 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 | `JS_MIN_SCHEDULE_INTERVAL` | `1m` |
 | `JS_BACKLOG_TARGET` | `5m` (pool backlog target for pools without their own: `LOW` is shed past it, `NORMAL` past 3×) |
 | `JS_WORKER_TOKEN` | optional cluster token for `engine` (≥ 16 chars) that admits workers to every pool; production uses per-pool tokens from `POST /v1/pools/{name}/worker-tokens` ([ADR-025](docs/decisions/ADR-025-per-pool-worker-tokens.md)) |
-| `JS_WORKER_ADDR` / `JS_WORKER_ADVERTISE_ADDR` | `:7070` / the listen address |
+| `JS_WORKER_ADDR` / `JS_WORKER_ADVERTISE_ADDR` | `:7070` / the listen address, or the first non-loopback IPv4 address for a wildcard listener |
 | `JS_NODE_ID` | hostname + random suffix |
 | `JS_HISTORY_RETENTION` | `720h` (30 days) |
 | `JS_DB_MAX_CONNS` | `10` |
@@ -62,8 +63,29 @@ Environment variables, validated at startup (full reference in [LLD §2.5](docs/
 | `JS_TRACE_SAMPLE_RATIO` | `1` (share of root traces kept) |
 | `JS_SHUTDOWN_DELAY` / `JS_SHUTDOWN_TIMEOUT` | `0s` / `30s` |
 | `JS_TLS_CERT_FILE` / `JS_TLS_KEY_FILE` | empty (plaintext); both set turn on TLS for the API and worker ports, reloaded on change ([ADR-026](docs/decisions/ADR-026-tls-in-process.md)) |
+| `JS_TLS_CERT` / `JS_TLS_KEY` | empty; the same as PEM text, for platforms that inject secrets as variables ([LLD §22.3](docs/low-level-design.md#223-tls)) |
+| `JS_RUNTIME_DB_ROLE` / `JS_RUNTIME_DB_PASSWORD` | empty; `migrate` creates this login role as a member of `jobscheduler_runtime` ([LLD §22.5](docs/low-level-design.md#225-migrations-and-the-runtime-role)) |
+
+The database password can also come from `PGPASSWORD`, keeping it out of `JS_DATABASE_URL`.
 
 Run a worker against a local engine: `make demo-worker && JS_WORKER_TOKEN=... ./bin/demo-worker` (add `-tls-ca ca.pem` when the engine serves TLS).
+
+## Deployment
+
+AWS, with ECS on Fargate ([ADR-030](docs/decisions/ADR-030-ecs-on-fargate.md), [LLD §22](docs/low-level-design.md#22-deployment)). Terraform in [`deploy/terraform`](deploy/terraform) creates an environment: a VPC, RDS PostgreSQL Multi-AZ, the `api`, `engine` and worker services behind an internal Network Load Balancer, TLS, secrets, a managed Prometheus that evaluates the alert rules, and autoscaling.
+
+1. **Once per AWS account,** an administrator applies the bootstrap root, which creates the state bucket and the role GitHub Actions assumes:
+
+   ```sh
+   make terraform
+   .tools/bin/terraform -chdir=deploy/terraform/bootstrap init
+   .tools/bin/terraform -chdir=deploy/terraform/bootstrap apply -var state_bucket=<unique-name> -var github_repository=<owner>/<repo>
+   ```
+
+2. **In the repository,** set the variables `AWS_DEPLOY_ROLE_ARN` and `TF_STATE_BUCKET` from its outputs, and `AWS_REGION`. Create a `deploy` environment, with a required reviewer if you like.
+3. **Create or destroy an environment:** `gh workflow run deploy.yml -f name=dev -f action=apply` (or `destroy`). An idle environment costs about $0.35 an hour (LLD §22.9).
+
+`make tf-check` formats and validates the Terraform without an AWS account; CI runs it. Runbooks for every alert are in [`docs/runbooks`](docs/runbooks).
 
 ## Observability
 
@@ -93,9 +115,11 @@ The load-test gate ([LLD §19](docs/low-level-design.md#19-load-test-gate)) chec
 ```
 api/openapi.yaml    REST API contract
 cmd/jobscheduler/   server binary (serve, migrate, bootstrap)
+cmd/demo-worker/    example worker pool
 deploy/prometheus/  Prometheus configuration, alert rules and their tests
 deploy/grafana/     Grafana dashboards and provisioning
+deploy/terraform/   AWS: bootstrap root, environment root, modules (LLD §22)
 internal/           application packages (see LLD §1)
 loadtest/           load-test gate: k6 scenario, worker fleet, verdict (LLD §19)
-docs/               designs, ADRs, plan
+docs/               designs, ADRs, plan, runbooks
 ```

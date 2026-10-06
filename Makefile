@@ -11,9 +11,12 @@ TOOLS              := $(CURDIR)/.tools
 PROTOC_OS          := $(if $(filter Darwin,$(shell uname -s)),osx-aarch_64,linux-x86_64)
 K6_VERSION         := 2.3.0
 K6_BUILD           := k6-v$(K6_VERSION)-$(if $(filter Darwin,$(shell uname -s)),macos-arm64,linux-amd64)
+TERRAFORM_VERSION  := 1.16.5
+TERRAFORM_OS       := $(if $(filter Darwin,$(shell uname -s)),darwin_arm64,linux_amd64)
+TF_ROOTS           := deploy/terraform/bootstrap deploy/terraform/env
 GO_DIRS            := cmd internal pkg loadtest
 
-.PHONY: build test test-short test-race cover vet fmt fmt-check lint tidy run migrate up down clean tools proto demo-worker k6 loadtest loadtest-smoke
+.PHONY: build test test-short test-race cover vet fmt fmt-check lint tidy run migrate up down clean tools proto demo-worker k6 loadtest loadtest-smoke terraform tf-check
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="$(LDFLAGS)" -o bin/jobscheduler ./cmd/jobscheduler
@@ -94,3 +97,20 @@ proto:
 		--go_out=. --go_opt=module=jobscheduler \
 		--go-grpc_out=. --go-grpc_opt=module=jobscheduler \
 		proto/jobscheduler/worker/v1/worker.proto
+
+# Installs the pinned Terraform into .tools unless it is already there.
+terraform:
+	@if [ ! -x "$(TOOLS)/bin/terraform" ]; then \
+		mkdir -p "$(TOOLS)/bin" && cd "$(TOOLS)" && \
+		curl -fsSL -o terraform.zip https://releases.hashicorp.com/terraform/$(TERRAFORM_VERSION)/terraform_$(TERRAFORM_VERSION)_$(TERRAFORM_OS).zip && \
+		unzip -oq terraform.zip terraform -d bin && rm terraform.zip; \
+	fi
+
+# Formats and validates the Terraform roots without touching an AWS account (LLD §22.7).
+tf-check: terraform
+	"$(TOOLS)/bin/terraform" fmt -check -recursive deploy/terraform
+	@for root in $(TF_ROOTS); do \
+		echo "validate $$root" && \
+		"$(TOOLS)/bin/terraform" -chdir=$$root init -backend=false -input=false >/dev/null && \
+		"$(TOOLS)/bin/terraform" -chdir=$$root validate -no-color || exit 1; \
+	done

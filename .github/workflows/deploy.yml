@@ -1,0 +1,132 @@
+name: deploy
+
+# Creates or destroys an AWS environment (LLD §22.7). Needs the bootstrap root applied once and
+# the repository variables AWS_DEPLOY_ROLE_ARN, AWS_REGION and TF_STATE_BUCKET; the "deploy"
+# GitHub environment can require a reviewer before anything runs.
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: Environment name (2-21 lowercase letters, digits or hyphens)
+        required: true
+        default: dev
+      action:
+        description: What to do
+        required: true
+        type: choice
+        options: [apply, destroy]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: deploy
+    timeout-minutes: 90
+    env:
+      NAME: ${{ inputs.name }}
+      ACTION: ${{ inputs.action }}
+      TAG: ${{ github.sha }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_IN_AUTOMATION: "1"
+    steps:
+      - name: Check the inputs
+        run: |
+          [[ "$NAME" =~ ^[a-z][a-z0-9-]{1,20}$ ]] || { echo "invalid environment name: $NAME"; exit 1; }
+          [[ -n "$AWS_REGION" && -n "$STATE_BUCKET" ]] || { echo "set the AWS_REGION and TF_STATE_BUCKET repository variables"; exit 1; }
+
+      - uses: actions/checkout@v5
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform init
+        run: |
+          make terraform
+          echo "TF=$PWD/.tools/bin/terraform -chdir=deploy/terraform/env" >> "$GITHUB_ENV"
+          .tools/bin/terraform -chdir=deploy/terraform/env init -input=false \
+            -backend-config="bucket=$STATE_BUCKET" -backend-config="key=env/$NAME.tfstate" \
+            -backend-config="region=$AWS_REGION"
+
+      - name: Destroy
+        if: inputs.action == 'destroy'
+        run: $TF destroy -auto-approve -input=false -var "name=$NAME" -var "image_tag=$TAG" -var "migrate_image_tag=$TAG"
+
+      - name: Create the image repositories
+        if: inputs.action == 'apply'
+        run: |
+          $TF apply -auto-approve -input=false -target=aws_ecr_repository.this -target=aws_ecr_lifecycle_policy.this \
+            -var "name=$NAME" -var "image_tag=$TAG" -var "migrate_image_tag=$TAG"
+
+      - name: Build and push the images
+        if: inputs.action == 'apply'
+        run: |
+          platform=$($TF output -json repositories | jq -r '.platform')
+          worker=$($TF output -json repositories | jq -r '."demo-worker"')
+          registry=${platform%%/*}
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+          push() { # repository, extra docker build arguments
+            local repo=$1; shift
+            if aws ecr describe-images --repository-name "${repo#*/}" --image-ids "imageTag=$TAG" >/dev/null 2>&1; then
+              echo "$repo:$TAG exists"; return
+            fi
+            docker build --build-arg "VERSION=$TAG" -t "$repo:$TAG" "$@" .
+            docker push "$repo:$TAG"
+          }
+          push "$platform"
+          push "$worker" --target demo-worker
+
+      # Migrations run before the services move to the new image: expand/contract (HLD §18.4).
+      - name: Apply with the new migrate image
+        if: inputs.action == 'apply'
+        run: |
+          current=$($TF output -raw image_tag 2>/dev/null || true)
+          [[ "$current" =~ ^[0-9a-f]{40}$ ]] || current=$TAG # first deploy
+          $TF apply -auto-approve -input=false -var "name=$NAME" -var "image_tag=$current" -var "migrate_image_tag=$TAG"
+
+      - name: Migrate
+        if: inputs.action == 'apply'
+        run: |
+          cluster=$($TF output -raw cluster)
+          migrate=$($TF output -json migrate)
+          subnets=$(jq -r '.subnets | join(",")' <<<"$migrate")
+          task=$(aws ecs run-task --cluster "$cluster" --launch-type FARGATE \
+            --task-definition "$(jq -r .task_definition <<<"$migrate")" \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$(jq -r .security_group <<<"$migrate")],assignPublicIp=DISABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+          echo "migrate task: $task"
+          aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task"
+          code=$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" \
+            --query 'tasks[0].containers[?name==`app`].exitCode | [0]' --output text)
+          [[ "$code" == "0" ]] || { echo "migrate exited with $code; see its log group"; exit 1; }
+
+      - name: Roll the services to the new image
+        if: inputs.action == 'apply'
+        run: |
+          $TF apply -auto-approve -input=false -var "name=$NAME" -var "image_tag=$TAG" -var "migrate_image_tag=$TAG"
+          cluster=$($TF output -raw cluster)
+          aws ecs wait services-stable --cluster "$cluster" --services $($TF output -json services | jq -r '.[]')
+
+      - name: Check the targets are healthy
+        if: inputs.action == 'apply'
+        run: |
+          for tg in $($TF output -json target_group_arns | jq -r '.[]'); do
+            states=$(aws elbv2 describe-target-health --target-group-arn "$tg" --query 'TargetHealthDescriptions[].TargetHealth.State' --output text)
+            echo "$tg: $states"
+            [[ -n "$states" && -z "$(tr '\t' '\n' <<<"$states" | grep -v '^healthy$')" ]] || { echo "unhealthy targets"; exit 1; }
+          done
+          {
+            echo "### Environment \`$NAME\` at \`$TAG\`"
+            echo "- API: $($TF output -raw api_url)"
+            echo "- Workers: $($TF output -raw worker_endpoint), verifying \`$($TF output -raw engine_server_name)\`"
+            echo "- CA certificate: \`terraform output -raw ca_certificate\`"
+          } >> "$GITHUB_STEP_SUMMARY"

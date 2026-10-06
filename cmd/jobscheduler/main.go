@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -125,12 +126,17 @@ func serve() error {
 	components := []app.Component{ops}
 	store := postgres.NewStore(pool)
 	var serverTLS *tls.Config // the API and worker servers; ops stays plaintext (ADR-026)
-	if cfg.TLS.Enabled() {
+	switch {
+	case cfg.TLS.CertFile != "":
 		certs, err := tlsconfig.NewReloader(cfg.TLS.CertFile, cfg.TLS.KeyFile, log)
 		if err != nil {
 			return err
 		}
 		serverTLS = certs.Config()
+	case cfg.TLS.CertPEM != "":
+		if serverTLS, err = tlsconfig.FromPEM([]byte(cfg.TLS.CertPEM), []byte(cfg.TLS.KeyPEM)); err != nil {
+			return err
+		}
 	}
 	if cfg.Roles.Has(config.RoleAPI) {
 		apiServer := api.New(store, log, api.Config{
@@ -154,7 +160,7 @@ func serve() error {
 		}
 		advertise := cfg.Engine.AdvertiseAddr
 		if advertise == "" {
-			advertise = lis.Addr().String()
+			advertise = advertiseAddr(lis.Addr(), net.InterfaceAddrs)
 		}
 		dispatcher, err := dispatch.New(store, dispatch.Config{NodeID: cfg.Engine.NodeID, AdvertiseAddr: advertise,
 			Token: cfg.Engine.WorkerToken, Listener: lis, TLS: serverTLS, BacklogTarget: cfg.BacklogTarget}, log)
@@ -241,7 +247,31 @@ func migrate() error {
 		return err
 	}
 	log.Info("migrations complete")
+	if role := cfg.Database.RuntimeRole; role != "" {
+		if err := postgres.EnsureLoginRole(ctx, pool, role, cfg.Database.RuntimePassword); err != nil {
+			return err
+		}
+		log.Info("runtime login role ready", "role", role)
+	}
 	return nil
+}
+
+// advertiseAddr is how workers reach this node when JS_WORKER_ADVERTISE_ADDR is unset: the
+// listener's address, or for a wildcard listener the first non-loopback IPv4 address, which on
+// Fargate is the task's (LLD §22.2).
+func advertiseAddr(listen net.Addr, interfaceAddrs func() ([]net.Addr, error)) string {
+	tcp, ok := listen.(*net.TCPAddr)
+	if !ok || !tcp.IP.IsUnspecified() {
+		return listen.String()
+	}
+	if addrs, err := interfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() && !n.IP.IsLinkLocalUnicast() {
+				return net.JoinHostPort(n.IP.String(), strconv.Itoa(tcp.Port))
+			}
+		}
+	}
+	return listen.String()
 }
 
 // bootstrap creates a tenant and prints its first admin API key, which is shown only once.
