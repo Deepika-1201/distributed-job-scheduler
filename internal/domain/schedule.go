@@ -216,7 +216,10 @@ type PlanLimits struct {
 	MaxFires         int // per schedule per pass
 }
 
-var DefaultPlanLimits = PlanLimits{Lookahead: 2 * time.Minute, MisfireThreshold: time.Minute, MaxMisfires: 100, MaxFires: 1000}
+// DefaultPlanLimits materialize 2.5 min ahead. The half minute keeps the materializer off cron
+// boundaries: a fire at a whole minute is materialized at the half minute, while the fires
+// due at the boundary are being promoted (ADR-032).
+var DefaultPlanLimits = PlanLimits{Lookahead: 150 * time.Second, MisfireThreshold: time.Minute, MaxMisfires: 100, MaxFires: 1000}
 
 // FirePlan is the materializer's decision for one schedule.
 type FirePlan struct {

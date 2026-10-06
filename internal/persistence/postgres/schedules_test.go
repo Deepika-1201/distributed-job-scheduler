@@ -290,6 +290,40 @@ func TestOverlapPolicies(t *testing.T) {
 	})
 }
 
+// Two promoters can split a schedule's due runs between their batches. The later run must
+// wait for the earlier one's decision, or skip would start both (ADR-033).
+func TestPromoterDefersRunsBehindAnEarlierDueRun(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	skip := f.createSchedule()
+	allow := f.createSchedule(func(s *domain.Schedule) { s.Overlap = domain.OverlapAllow })
+	f.materialize()
+	f.makeDue(skip, 1)
+	f.makeDue(allow, 1)
+
+	// Another promoter's batch holds both schedules' first runs.
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, sc := range []domain.Schedule{skip, allow} {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM jobs WHERE schedule_id = $1 AND fire_time = $2 FOR UPDATE`, string(sc.ID), sc.CreatedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st := f.promoteScheduled(); st.Promoted != 1 || st.Deferred != 1 || f.fireState(skip, 1) != domain.StateScheduled ||
+		f.fireState(allow, 1) != domain.StateReady {
+		t.Fatalf("stats %+v; want skip's fire 1 deferred and allow's promoted", st)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st := f.promoteScheduled(); st.Promoted != 2 || st.Skipped != 1 || f.fireState(skip, 1) != domain.StateSkipped {
+		t.Errorf("stats %+v, skip's fire 1 %s; want both first runs promoted and fire 1 skipped", st, f.fireState(skip, 1))
+	}
+}
+
 func TestPauseWithdrawsAndResumeRematerializes(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

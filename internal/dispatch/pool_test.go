@@ -41,6 +41,34 @@ func TestAllocateSplitsSlotsByWeight(t *testing.T) {
 	}
 }
 
+// A round with 50 typed waiters and an empty class used to claim it 50 times (phase 14).
+func TestSupplyRunsDryPerJobTypes(t *testing.T) {
+	sup := &supply{has: map[domain.Priority]bool{domain.PriorityHigh: true, domain.PriorityLow: true},
+		dry: map[string]map[domain.Priority]bool{}}
+	email, report := typesKey([]string{"email.send", "report.build"}), typesKey([]string{"report.build", "email.send", "email.send"})
+	if email != report || email == "" || typesKey(nil) != "" {
+		t.Fatalf("typesKey: %q, %q, %q; want equal sets equal and only no types empty", email, report, typesKey(nil))
+	}
+
+	sup.ranDry(email, domain.PriorityHigh)
+	if sup.open(email, domain.PriorityHigh) || !sup.open(email, domain.PriorityLow) || !sup.any(email) {
+		t.Error("an empty claim must close only its class, for the same job types")
+	}
+	if other := typesKey([]string{"email.send"}); !sup.open(other, domain.PriorityHigh) || !sup.open("", domain.PriorityHigh) {
+		t.Error("other job types, and waiters taking any type, may still find work in the class")
+	}
+	sup.ranDry(email, domain.PriorityLow)
+	if sup.any(email) || !sup.any("") {
+		t.Error("with both classes dry for the set, its waiters are skipped; others still try")
+	}
+
+	sup.ranDry("", domain.PriorityHigh)
+	sup.ranDry("", domain.PriorityLow)
+	if sup.any("") || sup.any(typesKey([]string{"other"})) {
+		t.Error("a waiter taking any type that comes back short empties the class for everyone")
+	}
+}
+
 func TestWaiterDeliversOnce(t *testing.T) {
 	w := &waiter{ready: make(chan struct{})}
 	jobs := []domain.Job{{ID: "a"}}

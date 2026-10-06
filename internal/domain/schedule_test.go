@@ -87,6 +87,27 @@ func TestPlanFires(t *testing.T) {
 	}
 }
 
+// A cron fire at a whole minute is materialized at the half minute before, not at the boundary
+// where the fires due then are promoted (ADR-032).
+func TestDefaultLookaheadMaterializesBetweenBoundaries(t *testing.T) {
+	cron := everyMinute(func(s *Schedule) {
+		s.Trigger = Trigger{Kind: TriggerCron, Cron: "* * * * *", TimeZone: "UTC"}
+		s.NextFireAt = t0.Add(3 * time.Minute)
+	})
+	for _, tc := range []struct {
+		now   time.Duration
+		fires int
+	}{{30*time.Second - time.Millisecond, 0}, {30 * time.Second, 1}, {time.Minute, 1}} {
+		got, err := PlanFires(cron, t0.Add(tc.now), DefaultPlanLimits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Fires) != tc.fires {
+			t.Errorf("at t0+%v: %d fires, want %d", tc.now, len(got.Fires), tc.fires)
+		}
+	}
+}
+
 func TestPlanFiresCapsFiresPerPass(t *testing.T) {
 	s := everyMinute(func(s *Schedule) { s.Trigger.Interval = time.Second })
 	got, err := PlanFires(s, t0, PlanLimits{Lookahead: time.Hour, MisfireThreshold: time.Minute, MaxFires: 10})

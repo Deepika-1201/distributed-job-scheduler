@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -209,11 +210,16 @@ func (p *pool) round() {
 		p.logError("reading tenant caps", err)
 		return
 	}
+	sup := &supply{has: has, dry: map[string]map[domain.Priority]bool{}}
 	for _, w := range waiters {
-		if !slices.ContainsFunc(urgency, func(pr domain.Priority) bool { return has[pr] }) {
+		if !sup.any("") {
 			return
 		}
-		jobs, err := p.fill(lease, w, has, cs)
+		types := typesKey(w.session.JobTypes)
+		if !sup.any(types) {
+			continue
+		}
+		jobs, err := p.fill(lease, w, types, sup, cs)
 		if len(jobs) > 0 {
 			if w.deliver(jobs) {
 				p.recordDispatch(jobs, w.polled)
@@ -230,14 +236,44 @@ func (p *pool) round() {
 	}
 }
 
+// supply tracks, within one round, the priority classes that may still hold claimable jobs.
+// A claim that comes back short empties its class for every waiter if the waiter takes any
+// job type, and otherwise for the later waiters with the same job types (LLD §12.3).
+type supply struct {
+	has map[domain.Priority]bool
+	dry map[string]map[domain.Priority]bool // by typesKey
+}
+
+func (s *supply) open(types string, pr domain.Priority) bool { return s.has[pr] && !s.dry[types][pr] }
+
+func (s *supply) any(types string) bool {
+	return slices.ContainsFunc(urgency, func(pr domain.Priority) bool { return s.open(types, pr) })
+}
+
+func (s *supply) ranDry(types string, pr domain.Priority) {
+	if types == "" {
+		s.has[pr] = false
+		return
+	}
+	if s.dry[types] == nil {
+		s.dry[types] = map[domain.Priority]bool{}
+	}
+	s.dry[types][pr] = true
+}
+
+// typesKey identifies a waiter's set of job types; "" means any type.
+func typesKey(types []string) string {
+	if len(types) == 0 {
+		return ""
+	}
+	sorted := slices.Clone(types)
+	slices.Sort(sorted)
+	return "\x00" + strings.Join(slices.Compact(sorted), "\x00")
+}
+
 // fill claims up to w.max jobs, allocating slots one at a time across priority classes with
 // the smooth weighted round-robin selector, then filling leftovers in urgency order.
-func (p *pool) fill(lease postgres.Lease, w *waiter, has map[domain.Priority]bool, cs *capState) ([]domain.Job, error) {
-	typed := len(w.session.JobTypes) > 0
-	avail := make(map[domain.Priority]bool, len(has))
-	for pr, ok := range has {
-		avail[pr] = ok
-	}
+func (p *pool) fill(lease postgres.Lease, w *waiter, types string, sup *supply, cs *capState) ([]domain.Job, error) {
 	var got []domain.Job
 	claim := func(pr domain.Priority, n int) error {
 		jobs, err := p.d.store.ClaimReady(p.ctx, postgres.ClaimRequest{Lease: lease, Pool: p.name, Priority: pr, Limit: n,
@@ -248,14 +284,11 @@ func (p *pool) fill(lease postgres.Lease, w *waiter, has map[domain.Priority]boo
 		got = append(got, jobs...)
 		cs.claimed(jobs)
 		if len(jobs) < n {
-			avail[pr] = false
-			if !typed {
-				has[pr] = false // nothing left in the class for anyone
-			}
+			sup.ranDry(types, pr)
 		}
 		return nil
 	}
-	plan := allocate(p.selector, w.max, func(pr domain.Priority) bool { return avail[pr] })
+	plan := allocate(p.selector, w.max, func(pr domain.Priority) bool { return sup.open(types, pr) })
 	for _, pr := range urgency {
 		if n := plan[pr]; n > 0 {
 			if err := claim(pr, n); err != nil {
@@ -264,7 +297,7 @@ func (p *pool) fill(lease postgres.Lease, w *waiter, has map[domain.Priority]boo
 		}
 	}
 	for _, pr := range urgency {
-		if left := w.max - len(got); left > 0 && avail[pr] {
+		if left := w.max - len(got); left > 0 && sup.open(types, pr) {
 			if err := claim(pr, left); err != nil {
 				return got, err
 			}
