@@ -23,6 +23,7 @@ One runbook per alert in [`deploy/prometheus/alerts.yml`](../../deploy/prometheu
 - [Database failover drill](database-failover-drill.md)
 - [Restoring the database](restore-database.md)
 - [Rotating credentials](rotate-credentials.md)
+- [Deciding load test](deciding-load-test.md)
 
 ## Conventions
 

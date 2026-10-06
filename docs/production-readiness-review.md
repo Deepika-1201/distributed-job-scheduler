@@ -213,7 +213,7 @@ Measured and **not** bottlenecks:
 | # | Condition | How to meet it |
 |---|---|---|
 | C1 | The AWS environment has never been created. Deploy, migration and rollback are validated only statically. | Bootstrap and deploy ([LLD §22](low-level-design.md#22-deployment)), then roll back once with the [rollback runbook](runbooks/rollback.md) |
-| C2 | The 5k jobs/s burst gate is decided on production hardware ([ADR-024](decisions/ADR-024-load-test-gate.md)) | Run the load test in the environment with `db_instance_class = "db.m7g.2xlarge"` ([LLD §23.5](low-level-design.md#235-capacity-model)) |
+| C2 | The 5k jobs/s burst gate is decided on production hardware ([ADR-024](decisions/ADR-024-load-test-gate.md)) | [deciding-load-test](runbooks/deciding-load-test.md): deploy with `db_instance_class=db.m7g.2xlarge`, then run the harness from a load-generator instance in the VPC |
 | C3 | The database failover drill hasn't been run | [database-failover-drill](runbooks/database-failover-drill.md) under load |
 
 **Findings.**

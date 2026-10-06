@@ -15,6 +15,10 @@ on:
         required: true
         type: choice
         options: [apply, destroy]
+      db_instance_class:
+        description: Database class; db.m7g.2xlarge for the deciding load test (LLD §23.5). Pass the same value on every apply.
+        required: true
+        default: db.t4g.medium
 
 permissions:
   contents: read
@@ -35,11 +39,13 @@ jobs:
       TAG: ${{ github.sha }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_VAR_db_instance_class: ${{ inputs.db_instance_class }}
       TF_IN_AUTOMATION: "1"
     steps:
       - name: Check the inputs
         run: |
           [[ "$NAME" =~ ^[a-z][a-z0-9-]{1,20}$ ]] || { echo "invalid environment name: $NAME"; exit 1; }
+          [[ "$TF_VAR_db_instance_class" =~ ^db\.[a-z0-9]+\.[a-z0-9]+$ ]] || { echo "invalid database class: $TF_VAR_db_instance_class"; exit 1; }
           [[ -n "$AWS_REGION" && -n "$STATE_BUCKET" ]] || { echo "set the AWS_REGION and TF_STATE_BUCKET repository variables"; exit 1; }
 
       - uses: actions/checkout@v5

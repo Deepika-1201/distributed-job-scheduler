@@ -1403,7 +1403,7 @@ Each `api` and `engine` task runs an AWS Distro for OpenTelemetry collector as a
 ### 22.7 Pipelines
 
 - **CI** (`ci.yml`) runs `terraform fmt -check` and `terraform validate` on both roots.
-- **Deploy** (`deploy.yml`) is manual, with inputs `name` and `action` (`apply` or `destroy`). It runs in the GitHub `deploy` environment, which can require a reviewer, and assumes the deploy role through OIDC (repository variables `AWS_DEPLOY_ROLE_ARN`, `AWS_REGION` and `TF_STATE_BUCKET`).
+- **Deploy** (`deploy.yml`) is manual, with inputs `name`, `action` (`apply` or `destroy`) and `db_instance_class`. The class defaults to `db.t4g.medium`, and `db.m7g.2xlarge` is the one for the deciding load test; pass the same class on every apply. It runs in the GitHub `deploy` environment, which can require a reviewer, and assumes the deploy role through OIDC (repository variables `AWS_DEPLOY_ROLE_ARN`, `AWS_REGION` and `TF_STATE_BUCKET`).
   - **Apply:**
     1. create the ECR repositories;
     2. build and push both images, tagged with the commit;
@@ -1420,7 +1420,8 @@ Each `api` and `engine` task runs an AWS Distro for OpenTelemetry collector as a
 - rolling back;
 - a database failover drill;
 - restoring from a snapshot or a point in time;
-- rotating credentials.
+- rotating credentials;
+- the deciding load test, run from a load-generator instance in the VPC against the environment's database (§23).
 
 ### 22.9 Cost
 
@@ -1529,7 +1530,7 @@ CPU per job below saturation, after tuning (runs 37491292387 and 37491249332):
 | `api` | 0.4 ms | 2 |
 | `engine`, both nodes | 0.4–0.5 ms | 2–2.5 |
 
-- **Database:** a primary with 8 vCPUs carries 5,000 jobs/s at about 65% CPU. That leaves headroom for maintenance and a failover's catch-up. The proposed production class is therefore 8 vCPUs, the low end of §19.4's earlier 8–16 estimate. In the deployment environment, set `db_instance_class = "db.m7g.2xlarge"` for the deciding run. The default `db.t4g.medium` serves functional environments only.
+- **Database:** a primary with 8 vCPUs carries 5,000 jobs/s at about 65% CPU. That leaves headroom for maintenance and a failover's catch-up. The proposed production class is therefore 8 vCPUs, the low end of §19.4's earlier 8–16 estimate. The deciding run deploys with `db_instance_class=db.m7g.2xlarge` ([runbook](runbooks/deciding-load-test.md)). The default `db.t4g.medium` serves functional environments only.
 - **Promotion throughput** on the runner: two engines promoted a boundary's 5,000 due jobs within about 0.5 s, and 10,000 within about 2.5 s, while dispatching them. Tier M's bursts are 2–5k.
 - **Schedule jobs** cost about 1.0 ms of database CPU each in the final 5,000-schedule run, and 1.6–1.8 ms in runs where the runner saturated:
   - materialization, about 0.3 ms;

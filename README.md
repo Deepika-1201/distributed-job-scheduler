@@ -11,7 +11,7 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 | [High-level design](docs/architecture.md) | Requirements, architecture, failure scenarios, deployment |
 | [Low-level design](docs/low-level-design.md) | Code structure, state machines, algorithms (grows each phase) |
 | [Decision records](docs/decisions/) | ADR-001 to ADR-033, one decision per file |
-| [Runbooks](docs/runbooks/) | One per alert, plus rollback, failover drill, restore and credential rotation |
+| [Runbooks](docs/runbooks/) | One per alert, plus rollback, failover drill, restore, credential rotation and the deciding load test |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
 | [Production readiness review](docs/production-readiness-review.md) | The original brief's checklist, answered with evidence; conditions for launch |
 
@@ -84,7 +84,7 @@ AWS, with ECS on Fargate ([ADR-030](docs/decisions/ADR-030-ecs-on-fargate.md), [
    ```
 
 2. **In the repository,** set the variables `AWS_DEPLOY_ROLE_ARN` and `TF_STATE_BUCKET` from its outputs, and `AWS_REGION`. Create a `deploy` environment, with a required reviewer if you like.
-3. **Create or destroy an environment:** `gh workflow run deploy.yml -f name=dev -f action=apply` (or `destroy`). An idle environment costs about $0.35 an hour (LLD §22.9).
+3. **Create or destroy an environment:** `gh workflow run deploy.yml -f name=dev -f action=apply` (or `destroy`). An idle environment costs about $0.35 an hour (LLD §22.9). Add `-f db_instance_class=db.m7g.2xlarge` for the [deciding load test](docs/runbooks/deciding-load-test.md).
 
 `make tf-check` formats and validates the Terraform without an AWS account; CI runs it. Runbooks for every alert are in [`docs/runbooks`](docs/runbooks).
 
