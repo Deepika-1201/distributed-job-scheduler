@@ -1047,7 +1047,7 @@ Job types, schedules and jobs belong to a tenant. Pools are platform resources o
 ### 16.3 Tenant isolation and noisy neighbours
 
 - `tenant_id` comes only from the authenticated credential, never from the request body.
-- Repository methods take the tenant as a required argument, so every query is tenant-scoped by construction. CI runs cross-tenant access tests. PostgreSQL row-level security as a second line of defence is an LLD decision.
+- Repository methods take the tenant as a required argument, so every query is tenant-scoped by construction. CI runs cross-tenant access tests. PostgreSQL row-level security is not adopted in V1 ([ADR-028](decisions/ADR-028-row-level-security.md)); a route-wide isolation test is the second line.
 - Noisy-neighbour controls:
   - at admission: per-tenant rate limits and quotas;
   - at dispatch: per-(tenant, pool) concurrency caps, weighted priority and role-restricted `CRITICAL`;
@@ -1385,6 +1385,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-025](decisions/ADR-025-per-pool-worker-tokens.md) | Per-pool worker tokens, issued through the API | Accepted |
 | [ADR-026](decisions/ADR-026-tls-in-process.md) | TLS terminated in the process, with certificate reload | Accepted |
 | [ADR-027](decisions/ADR-027-least-privilege-database-roles.md) | Least-privilege database roles | Accepted |
+| [ADR-028](decisions/ADR-028-row-level-security.md) | Row-level security is not adopted in V1 | Accepted |
 
 ## Appendix C — Open questions for the LLD
 
@@ -1394,7 +1395,7 @@ Resolved questions link to their answer.
 2. Exact schema: partition granularity, indexes, fillfactor and HOT-update strategy. → [LLD §8.1](low-level-design.md#81-storage-layout)
 3. Attempt storage: current-attempt columns on the job plus history rows, or attempt rows only? → [LLD §8.1](low-level-design.md#81-storage-layout)
 4. Store payloads in a separate table with shorter retention than job metadata? → [LLD §8.1](low-level-design.md#81-storage-layout)
-5. Adopt PostgreSQL row-level security as a second tenant-isolation layer? → [LLD §8.1](low-level-design.md#81-storage-layout), revisited in phase 12
+5. Adopt PostgreSQL row-level security as a second tenant-isolation layer? → [ADR-028](decisions/ADR-028-row-level-security.md): not in V1; a route-wide isolation test instead
 6. Concurrent duplicate `Idempotency-Key` requests: wait and replay, or return `409` immediately? → [LLD §8.4](low-level-design.md#84-idempotency)
 7. Worker protocol: transport (gRPC or HTTP/2), message schemas and versioning rules. → [ADR-014](decisions/ADR-014-worker-protocol.md)
 8. How pool-owner redirects work, and how workers reconnect and back off. → [ADR-014](decisions/ADR-014-worker-protocol.md)

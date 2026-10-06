@@ -25,6 +25,29 @@ jobs:
       - run: make test-race
       - run: make build
 
+  # Known vulnerabilities reachable from our code, with the Go release the image builds with (LLD §20.6).
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
+        with:
+          go-version-input: "1.27"
+          check-latest: true
+          go-package: ./...
+
+  # The container image, failing on fixable HIGH or CRITICAL findings (LLD §20.6).
+  image-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -t jobscheduler:ci .
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: jobscheduler:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
   # The load-test harness at a low rate, so it keeps working (LLD §19.3).
   loadtest-smoke:
     runs-on: ubuntu-latest

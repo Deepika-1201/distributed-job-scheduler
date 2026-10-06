@@ -273,7 +273,7 @@ A job moves to `job_history` in the same transaction as its terminal transition 
 | 2 | Partitioning and indexes | As above. Daily partitions with a default partition as a safety net: a missing partition must never block a terminal transition. The indexes are listed in §8.2. |
 | 3 | How attempts are stored | Current attempt as columns on the job row; finished attempts as append-only rows. |
 | 4 | Separate payload table? | Not in V1. Payloads (≤ 64 KB) stay on the job row, stored as `json` so the submitted text is preserved exactly. Revisit once storage has been measured. |
-| 5 | Row-level security? | Not in V1. Every tenant-facing repository method takes the tenant ID as a required argument, and tests cover cross-tenant access. Revisit in phase 12. |
+| 5 | Row-level security? | Not in V1 ([ADR-028](decisions/ADR-028-row-level-security.md)). Every tenant-facing repository method takes the tenant ID as a required argument, and a route-wide test covers cross-tenant access (§20.6). |
 
 ### 8.2 Tables (phase 3 migration)
 
@@ -1195,6 +1195,7 @@ Not adopted in V1 ([ADR-028](decisions/ADR-028-row-level-security.md)). Tenant s
   - `govulncheck` on every push;
   - the container image is built and scanned with Trivy, failing on fixable `HIGH` or `CRITICAL` findings;
   - Dependabot updates Go modules, GitHub Actions and the Docker base images weekly.
+  - At introduction, govulncheck found GO-2026-6443 in `google.golang.org/grpc` v1.84.0. The panic needs xDS routing, which the platform doesn't use, but the module is pinned to v1.83.2, which has the fix, until a fixed v1.85 is released.
 
 ### 20.7 OWASP API Security Top 10 (2023)
 
