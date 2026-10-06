@@ -41,9 +41,10 @@ How do concurrent promoters keep each schedule's overlap decisions in fire-time 
 - **Heads.** A batch locks up to 500 heads in `run_at` order with `SKIP LOCKED`.
   - A head is a due `SCHEDULED` job with no earlier-fire due `SCHEDULED` job of the same schedule.
   - Another batch can only decide a schedule by holding its head, so concurrent batches never split one.
-- **Later runs.** The batch then locks the heads' later due runs, up to 500 more, with a plain `FOR UPDATE`.
+- **Later runs.** A second statement then locks the heads' later due runs, up to 500 more, with a plain `FOR UPDATE`. It runs only when there are heads.
   - No promoter holds these without the head. A cancellation that holds one makes the batch wait for at most `lock_timeout`.
   - Runs beyond the cap form the next batch, under a new head.
+  - **Why two statements:** the first version did both in one. Its cached generic plan scanned the whole `jobs_schedule_idx` on every idle poll: 9 ms at 5,000 schedules and 27 ms at 10,000. The cron run then missed NFR-3 (run 37494983993). Laterals keep each lookup on an index whatever the plan.
 - **Counts.** The counts of earlier active and waiting runs are computed once per head, for the locked heads only.
   - Each schedule is then decided in fire-time order, as before.
   - Every policy, `allow` included, follows the same path.
@@ -53,6 +54,6 @@ How do concurrent promoters keep each schedule's overlap decisions in fire-time 
 
 ## Trade-offs
 
-- Finding heads costs one index probe per due row on `jobs_schedule_idx`.
+- Finding heads costs one index probe per due row on `jobs_schedule_idx`. A batch at a boundary takes two statements.
 - A batch can decide up to 1,000 jobs: 500 heads and 500 later runs.
 - Promoter concurrency is now safe at any degree, whether from more engine nodes or from parallel batches within a node.

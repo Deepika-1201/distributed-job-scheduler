@@ -530,9 +530,10 @@ Every engine node runs one every 250 ms, and continuously while any step fills i
 
 For schedule jobs, "an earlier run is active" means an earlier-fire job of the same schedule is `READY`, `RUNNING` or `RETRY_PENDING`. The batch is processed in `(schedule_id, fire_time)` order, and jobs promoted earlier in the batch count as active.
 
-- **Heads** ([ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md)): a batch locks schedules by their head, the due `SCHEDULED` run with no earlier due `SCHEDULED` run of the same schedule. It takes heads in `run_at` order with `SKIP LOCKED`, then locks the heads' later due runs.
+- **Heads** ([ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md)): a batch locks schedules by their head, the due `SCHEDULED` run with no earlier due `SCHEDULED` run of the same schedule. It takes heads in `run_at` order with `SKIP LOCKED`. When there are heads, a second statement locks their later due runs, one index range per head.
   - Concurrent batches never split a schedule's decisions, since only the head's holder decides them.
   - Heads never wait behind another run, so every batch progresses, even when jitter sorts a later fire first.
+  - Idle polls cost one index probe.
 - **Counts:** the earlier active and waiting runs are counted once per head, for the locked heads only, in one pass over `jobs_schedule_idx`.
 
 | Overlap policy | Earlier run active | Otherwise |
@@ -1489,6 +1490,7 @@ Phase 14: tier M scenarios against NFR-1 to NFR-4 ([HLD §5](architecture.md#5-n
 4. **Concurrent promoters could break overlap policies.** Found while reviewing the promoter: two batches could split one schedule's due runs.
    - *First fix:* deferring the split runs. Its own test showed it could stall, when a batch filled with runs waiting on a lock or on a later-sorted earlier fire.
    - *Final fix:* batches take each schedule by its earliest due run ([ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md)).
+   - *Plan trap:* its one-statement draft failed NFR-3 again (run 37494983993, p99 2.3 s). PostgreSQL's cached generic plan scanned a whole index on every idle poll. The shipped form uses two statements with index-driven laterals; locally it costs the same as the original promoter, 0.2 ms an idle poll and 55 ms for 5,000 fires with two promoters.
 
    This is a correctness fix, not a speed one.
 5. **Heartbeats don't need batching.** Measured at about 1.9 ms of database time per heartbeat: 0.08 vCPU for 200 workers ([ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md)).
