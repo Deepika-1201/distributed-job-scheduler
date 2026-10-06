@@ -2,7 +2,7 @@
 
 A distributed job scheduling and execution platform: durable jobs that run now, later or on a recurring schedule, with at-least-once execution, retries, priorities and fair sharing across tenants, on a horizontally scalable worker fleet.
 
-**Status:** phases 1–4 and 6–12 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies), coordination (epoch-fenced leases with self-fencing) and the worker system (gRPC [protocol](proto/jobscheduler/worker/v1/worker.proto), dispatcher with weighted priorities and tenant caps, [Go SDK](pkg/workersdk), demo worker), recovery (reaper with warm-up, engine-side timeouts, retention and partition maintenance, bulk cancel and re-drive), observability (Prometheus metrics, OpenTelemetry traces linked from submission to execution, alert rules), security hardening (per-pool worker tokens, API key rotation, TLS, a least-privilege database role, a route-wide tenant-isolation test, vulnerability and image scanning), and failure testing (a fault-injection suite covering HLD scenarios S1–S14; workers ride out database failovers without losing running jobs). Every V1 functional requirement is implemented. That includes platform administration (worker drain, pool and job-type pause), tenant quotas with priority-aware load shedding, and payload JSON Schemas.
+**Status:** phases 0–14 of the [implementation plan](docs/implementation-plan.md) are done. Phase 13's AWS environment is built and validated in CI, and creating it needs an AWS account. The work covers: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies), coordination (epoch-fenced leases with self-fencing) and the worker system (gRPC [protocol](proto/jobscheduler/worker/v1/worker.proto), dispatcher with weighted priorities and tenant caps, [Go SDK](pkg/workersdk), demo worker), recovery (reaper with warm-up, engine-side timeouts, retention and partition maintenance, bulk cancel and re-drive), observability (Prometheus metrics, OpenTelemetry traces linked from submission to execution, alert rules), security hardening (per-pool worker tokens, API key rotation, TLS, a least-privilege database role, a route-wide tenant-isolation test, vulnerability and image scanning), and failure testing (a fault-injection suite covering HLD scenarios S1–S14; workers ride out database failovers without losing running jobs), deployment (Terraform for ECS on Fargate with RDS, a manual deploy workflow, runbooks for every alert), and load testing (tier M scenarios and the tuning they led to). Every V1 functional requirement is implemented. That includes platform administration (worker drain, pool and job-type pause), tenant quotas with priority-aware load shedding, and payload JSON Schemas.
 
 ## Documentation
 
@@ -10,7 +10,7 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 |---|---|
 | [High-level design](docs/architecture.md) | Requirements, architecture, failure scenarios, deployment |
 | [Low-level design](docs/low-level-design.md) | Code structure, state machines, algorithms (grows each phase) |
-| [Decision records](docs/decisions/) | ADR-001 to ADR-030, one decision per file |
+| [Decision records](docs/decisions/) | ADR-001 to ADR-033, one decision per file |
 | [Runbooks](docs/runbooks/) | One per alert, plus rollback, failover drill, restore and credential rotation |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
 
@@ -104,9 +104,19 @@ AWS, with ECS on Fargate ([ADR-030](docs/decisions/ADR-030-ecs-on-fargate.md), [
 
 ## Load test
 
-The load-test gate ([LLD §19](docs/low-level-design.md#19-load-test-gate)) checks that one PostgreSQL primary sustains bursts of 5,000 jobs/s with p99 dispatch latency at most 1 s.
+The load-test gate ([LLD §19](docs/low-level-design.md#19-load-test-gate)) checks that one PostgreSQL primary sustains bursts of 5,000 jobs/s with p99 dispatch latency at most 1 s. Phase 14 added tier M scenarios and a capacity report ([LLD §23](docs/low-level-design.md#23-capacity)).
 
-- `gh workflow run loadtest.yml` runs it on a clean GitHub-hosted runner and puts the verdict in the run's summary.
+On a 4-vCPU GitHub runner, with PostgreSQL, the nodes, the workers and k6 sharing the machine:
+
+| Scenario | Result |
+|---|---|
+| 1,000 jobs/s burst | Dispatch p99 136 ms; 1.0 ms of database CPU per job |
+| 5,000 schedules firing at the same minute | Scheduling lag p99 488 ms |
+| 200 workers, about 10,000 jobs running | Dispatch p99 200 ms |
+
+So 5,000 jobs/s needs an 8-vCPU primary, and the deciding run happens in the deployment environment.
+
+- `gh workflow run loadtest.yml` runs it on a clean GitHub-hosted runner and puts the verdict in the run's summary. Its inputs select the scenario: `-f scenario=cron -f schedules=5000`, `-f future=300000`, `-f workers=200 -f slots=60 -f work=10s`, `-f pools=1`.
 - `make loadtest` runs the same harness on this machine: a throwaway PostgreSQL (or `JS_DATABASE_URL`), one `api` node, two engines, a fleet of SDK workers, and k6. Logs go to `loadtest/out/`.
 - `make loadtest-smoke` is a short, low-rate version that CI runs on every push.
 
@@ -120,6 +130,6 @@ deploy/prometheus/  Prometheus configuration, alert rules and their tests
 deploy/grafana/     Grafana dashboards and provisioning
 deploy/terraform/   AWS: bootstrap root, environment root, modules (LLD §22)
 internal/           application packages (see LLD §1)
-loadtest/           load-test gate: k6 scenario, worker fleet, verdict (LLD §19)
+loadtest/           load-test gate and capacity scenarios: k6, worker fleet, verdict (LLD §19, §23)
 docs/               designs, ADRs, plan, runbooks
 ```

@@ -1,6 +1,6 @@
 # ADR-001: Scheduler architecture
 
-- **Status:** Accepted
+- **Status:** Accepted. The lookahead is amended to 2.5 min by [ADR-032](ADR-032-materialize-between-cron-boundaries.md).
 - **Date:** 2026-09-26
 - **Related:** [HLD §11](../architecture.md#11-scheduling-architecture), [ADR-005](ADR-005-distributed-locking-and-fencing.md), [ADR-006](ADR-006-leader-election.md), [ADR-013](ADR-013-cron-evaluation.md), [ADR-016](ADR-016-withdrawing-provisional-schedule-jobs.md)
 

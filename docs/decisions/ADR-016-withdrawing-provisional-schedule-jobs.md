@@ -6,7 +6,7 @@
 
 ## Context
 
-- **Jobs exist before they are due.** The materializer creates each schedule's jobs up to 2 minutes early ([ADR-001](ADR-001-scheduler-architecture.md)). The `schedule_fires` ledger records every fire time it has materialized, which is how invariant I2 (one job per fire time) survives jobs moving to history.
+- **Jobs exist before they are due.** The materializer creates each schedule's jobs up to 2 minutes early ([ADR-001](ADR-001-scheduler-architecture.md); 2.5 minutes since [ADR-032](ADR-032-materialize-between-cron-boundaries.md)). The `schedule_fires` ledger records every fire time it has materialized, which is how invariant I2 (one job per fire time) survives jobs moving to history.
 - **The requirement.** Pausing, editing or deleting a schedule must not run the old definition afterwards ([HLD §11.7](../architecture.md#117-schedule-changes)).
 
 ## Problem

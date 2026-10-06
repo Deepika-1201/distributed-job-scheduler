@@ -26,6 +26,7 @@ Implements the [HLD](architecture.md). This document grows phase by phase, and e
 | [20. Security hardening](#20-security-hardening) | 12 | Written |
 | [21. Failure testing](#21-failure-testing) | 10 | Written |
 | [22. Deployment](#22-deployment) | 13 | Written |
+| [23. Capacity](#23-capacity) | 14 | Written |
 | Events and outbox | Later | Planned |
 
 The [HLD's open questions](architecture.md#appendix-c--open-questions-for-the-lld) are resolved in the phase that needs them: 1–5 in phase 3 (§8.1), 6 and 12 in phase 4, 7–9 in phase 8, 10 and 11 in phase 6, 13 in phase 10, 14 in phase 4.
@@ -496,7 +497,7 @@ Decision record for cron evaluation: [ADR-013](decisions/ADR-013-cron-evaluation
 
 Every engine node runs one. Each second (and again at once when a batch was full), it runs a transaction:
 
-1. Lock up to 100 due schedules: `state = 'ACTIVE' AND next_fire_at <= now() + lookahead` (2 min), ordered by `next_fire_at`, `FOR UPDATE SKIP LOCKED`.
+1. Lock up to 100 due schedules: `state = 'ACTIVE' AND next_fire_at <= now() + lookahead` (2.5 min), ordered by `next_fire_at`, `FOR UPDATE SKIP LOCKED`. The extra half minute materializes fires at whole minutes at the half minute, away from the boundary where due fires are promoted ([ADR-032](decisions/ADR-032-materialize-between-cron-boundaries.md)).
 2. For each schedule, `domain.PlanFires` returns the fire times to create, the new cursor, and whether the schedule is now completed:
    - **Misfire:** a cursor older than `now() − 1 min` is a misfire.
      - `fire_once`: one fire at the latest missed time.
@@ -529,6 +530,9 @@ Every engine node runs one every 250 ms, and continuously while any step fills i
 
 For schedule jobs, "an earlier run is active" means an earlier-fire job of the same schedule is `READY`, `RUNNING` or `RETRY_PENDING`. The batch is processed in `(schedule_id, fire_time)` order, and jobs promoted earlier in the batch count as active.
 
+- **Concurrent batches** ([ADR-033](decisions/ADR-033-deferring-split-overlap-decisions.md)): when a schedule has an earlier due `SCHEDULED` run outside the batch, held by another promoter or sorted later by jitter, its jobs in the batch are deferred: left `SCHEDULED` and decided after that run. `allow` is exempt. Deferred jobs don't count as progress, so a batch that decided nothing doesn't repeat at once.
+- **Batch query:** locks the due jobs first, then counts each locked job's earlier runs (active, waiting, and waiting but due) in one pass over `jobs_schedule_idx`.
+
 | Overlap policy | Earlier run active | Otherwise |
 |---|---|---|
 | `skip` (default) | → `SKIPPED` (T20) | → `READY` |
@@ -545,7 +549,7 @@ For schedule jobs, "an earlier run is active" means an earlier-fire job of the s
 - **Withdrawal** (resolves HLD open question 11; [ADR-016](decisions/ADR-016-withdrawing-provisional-schedule-jobs.md)):
   - Deletes the schedule's `SCHEDULED` jobs with `run_at > now()`, and their `schedule_fires` rows.
   - Lowers `fire_count` by the number withdrawn and sets `next_fire_at` to the earliest withdrawn fire time.
-  - These jobs are provisional lookahead artifacts. Deleting them, rather than cancelling them, avoids flooding history with up to 2 min of cancellations per edit. It also lets the new definition re-materialize the same fire times. Audit rows record the count.
+  - These jobs are provisional lookahead artifacts. Deleting them, rather than cancelling them, avoids flooding history with up to 2.5 min of cancellations per edit. It also lets the new definition re-materialize the same fire times. Audit rows record the count.
 - **Pause:** `ACTIVE` → `PAUSED`, then withdraw. **Resume:** `PAUSED` → `ACTIVE`. The materializer then treats a stale cursor as a misfire, which applies the misfire policy.
 - **Edit (`PATCH`):**
   - Withdraw, apply the changes, and recompute the cursor from `max(now, last kept fire)`.
@@ -654,7 +658,7 @@ Implements HLD §12 and [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.m
 - **`engine_nodes`:** `node_id`, `beat_at`, `stopped_at`. Each engine records its liveness every heartbeat interval: the evidence session expiry needs (§13.1, ADR-029).
 - **`tenants.max_running`:** optional per-tenant cap on running jobs in each pool; `NULL` means unlimited. Managed through the quotas API (§15).
 - **Index:** `jobs (tenant_id) WHERE state = 'RUNNING'` serves cap counting.
-- **Heartbeats** update the session row directly: one write per worker every 5 s, 200 writes/s for 1,000 workers. Batching renewals per engine (HLD §12.2) is a phase 14 optimization.
+- **Heartbeats** update the session row directly: one transaction per worker every 5 s, 200 a second for 1,000 workers. Batching renewals per engine (HLD §12.2) was measured in phase 14 and not adopted: 200 workers cost about 0.08 vCPU of database time ([ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md)).
 
 ### 12.3 Dispatcher
 
@@ -669,6 +673,7 @@ Every engine node runs the gRPC server, plus a pool lease manager (§11.3).
      - Allocates its free slots one at a time with the pool's smooth weighted round-robin selector over the classes with work (§7). This makes the 8:4:2:1 shares hold per job, not per batch.
      - Claims each class's share with `ClaimReady`: fenced by the pool lease, filtered by the waiter's job types, and skipping tenants at their cap.
      - Fills slots left over from classes that ran dry from any other class with work, in urgency order.
+  4. A claim that comes back short marks its class empty for the rest of the round: for every waiter if the waiter takes any job type, otherwise for later waiters with the same set of job types. Waiters with nothing left to try are passed over, and the round ends when no class has work for anyone. Before phase 14, typed waiters never closed a class for each other, so every waiter cost an empty claim and a lease check (§23.3).
 - **Exact tenant caps:** the claim over-fetches candidates. `row_number() OVER (PARTITION BY tenant_id)` then limits each capped tenant to its remaining allowance, in the same statement. Rows locked but not picked are released at commit.
 - **Commit before send:** a waiter gets its jobs only after the claim commits. If the waiter has gone (timeout or client disconnect) by delivery time, its jobs are **released** (T23).
 - **Losing the lease** (`ErrLeaseLost`, or `OnLost`) stops the pool loop. Its waiters return empty, and their next poll is redirected.
@@ -1111,7 +1116,7 @@ The run that decides is in the deployment environment (phase 13). Until then, a 
 | 2026-10-05 | The same, offering 1,000 jobs/s | 4 | 1,004 | 1,003 | 100% | 96 ms | Pass |
 | 2026-10-05 | The same, offering 800 jobs/s | 4 | 804 | 804 | 100% | 98 ms | Pass |
 
-**Capacity per job.** The runner runs every component on 4 vCPUs. At the rates it sustains, each job cost this much CPU:
+**Capacity per job.** The runner runs every component on 4 vCPUs. At the rates it sustains, each job cost this much CPU (before the phase 14 dispatch fix; §23.5 has the current model):
 
 | Component | CPU per job | vCPUs at 5,000 jobs/s |
 |---|---|---|
@@ -1432,3 +1437,129 @@ Destroying the environment stops all of it except the state bucket.
 - **Store:** `EnsureLoginRole` creates a member of `jobscheduler_runtime` that can log in with its password and is idempotent. The password appears nowhere in the statements sent.
 - **TLS:** a server configured from PEM variables serves the certificate.
 - **CI:** `terraform validate` on both roots and `docker build` of both images, which the image scan already runs.
+
+## 23. Capacity
+
+Phase 14: tier M scenarios against NFR-1 to NFR-4 ([HLD §5](architecture.md#5-non-functional-requirements)), the tuning they led to, and the capacity model that carries over to a deployment. It extends the gate harness of §19.
+
+### 23.1 Scenarios
+
+| Scenario | Offered load | Measures |
+|---|---|---|
+| Burst | k6 submits at 500 jobs/s, then `BURST_RATE` for 60 s, judged over the steady 50 s. 4 pools, 40 workers × 25 slots, 20 ms jobs. | NFR-1, NFR-4 |
+| Cron boundary | `SCHEDULES` schedules with cron `* * * * *`, spread over the tenants (`schedules.js`). The gate watches 180 s from a half minute, so the window holds three boundaries, and judges every promotion in it. | NFR-3, and NFR-4 for the promoted jobs |
+| Future-dated volume | `FUTURE` jobs due in a day, seeded through the API (`seed.js`) before a 1,000 jobs/s burst | NFR-2's timer store, scaled down to 300,000 rows |
+| Worker scale | 200 workers × 60 slots, 10 s jobs, 1,000 jobs/s: about 10,000 jobs running | NFR-2's workers and running jobs; heartbeat cost (ADR-031) |
+| One pool | All load in one pool (`POOLS=1`) | One dispatcher's share ([HLD §15.3](architecture.md#153-scaling-each-tier)) |
+
+**Cron verdict.** The gate runs with `-scenario cron`. It counts the boundaries in its window and passes when all of these hold:
+
+1. at least 99% of schedules × boundaries were promoted (`scheduling_lag_seconds_count`);
+2. at least 99% of scheduling lags fall in the 1 s bucket (NFR-3);
+3. dispatch latency holds as in §19.2;
+4. dispatches reach 95% of promotions.
+
+### 23.2 Environment and method
+
+- **The machine.** A GitHub-hosted runner (4 vCPUs, 16 GB) runs everything: PostgreSQL 17 in Docker on local SSD with host networking and durable commits, one `api` node, two engines, the worker fleet and k6.
+- **What results mean.** Every component competes for the same 4 vCPUs, so a run is a lower bound. Its ceiling is the machine's, not the architecture's.
+- **Per-job costs carry over.** CPU per job is measured below saturation, and statement counts come from `pg_stat_statements`. Once the machine saturates, CPU per job rises by about half, from lock waits and context switches.
+- **Run-to-run variance.** Two runs of the same code at 1,000 jobs/s measured 1.26 and 1.79 ms of database CPU per job, and a p99 dispatch latency of 98 and 576 ms. Statement counts don't vary, so they judge each fix.
+- **Diagnostics.** The `loadtest` workflow samples CPU by process and database wait events every 20 s. At the end it prints the top statements and table sizes.
+
+### 23.3 Findings and fixes
+
+1. **Typed waiters made every round claim every waiter.**
+   - *Mechanism:* a claim that came back short closed its priority class only for waiters that take any job type. The load-test workers, like most real ones, declare their job types. Each round therefore issued a claim per waiter and class, and every empty claim cost a lease check (§11.2).
+   - *Before:* the 200-worker run issued 191,091 claims and 146,214 lease checks for 88,050 jobs. Rounds took about 200 ms, and p99 dispatch latency was 2.42 s.
+   - *Fix:* a round now remembers, for each set of job types, the classes found empty (§12.3).
+   - *After:* the same run issued 38,755 claims and 3,070 lease checks, and p99 dispatch latency was 200 ms.
+   - *Side effect:* the plain 1,000 jobs/s burst went from 135,017 claims to 31,303. Its database CPU per job fell from 1.79 to 1.00 ms, and the engines' from 0.77 to 0.42 ms.
+2. **The materializer ran at the boundary it was preparing for.**
+   - *Mechanism:* with a 2 min lookahead, a whole-minute fire was materialized at a whole minute. Each boundary paid for 5,000 materializations on top of 5,000 promotions.
+   - *Before:* materialize transactions had a p99 of 872 ms.
+   - *Fix:* a 2.5 min lookahead moves the materialization to the half minute ([ADR-032](decisions/ADR-032-materialize-between-cron-boundaries.md)).
+   - *After:* the p99 was 99 ms.
+3. **The promoter's query computed its overlap counts expensively.**
+   - *Mechanism:* two correlated counts per due job, computed before locking. The batch select cost about 0.14 ms a job.
+   - *Fix:* it now locks the batch first, then counts each locked job's earlier runs in one pass (§10.4).
+   - *After:* about 0.03 ms a job.
+4. **Concurrent promoters could break overlap policies.** Found while reviewing the promoter: two batches could split one schedule's due runs. Fixed by deferral ([ADR-033](decisions/ADR-033-deferring-split-overlap-decisions.md)). This is a correctness fix, not a speed one.
+5. **Heartbeats don't need batching.** Measured at about 1.9 ms of database time per heartbeat: 0.08 vCPU for 200 workers ([ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md)).
+
+### 23.4 Results
+
+Before tuning (commit `1ed05bf`):
+
+| Run | Scenario | NFR | Measured | Verdict |
+|---|---|---|---|---|
+| 37482205100 | Burst 1,000/s | NFR-4 | Dispatch p99 576 ms | Pass |
+| 37482226563 | Burst 2,000/s | NFR-1 | Accepted 1,225/s: the runner's CPU ceiling | Fail |
+| 37482248549 | Cron, 5,000 schedules | NFR-3 | 96.17% ≤ 1 s, p99 2.11 s | Fail |
+| 37482265068 | Cron, 10,000 schedules | NFR-3 | 50% ≤ 1 s, p99 4.25 s | Fail |
+| 37482283692 | Burst 1,000/s after seeding 300,000 future jobs | NFR-2, NFR-4 | Dispatch p99 98 ms; 1.26 ms of database CPU per job | Pass |
+| 37482299386 | 200 workers × 60 slots, 10 s jobs | NFR-2, NFR-4 | 87.27% ≤ 1 s, p99 2.42 s | Fail |
+
+After tuning (commit `2956bea`):
+
+| Run | Scenario | NFR | Measured | Verdict |
+|---|---|---|---|---|
+| 37491292387 | Burst 1,000/s | NFR-4 | Dispatch p99 136 ms, queue wait p99 196 ms | Pass |
+| 37492235086 | Burst 2,000/s | NFR-1 | Accepted 1,186/s, the same CPU ceiling; dispatch p99 781 ms | Fail (runner) |
+| 37491236953 | Cron, 5,000 schedules | NFR-3 | 100% ≤ 1 s, p50 194 ms, p99 488 ms; dispatch p99 750 ms | Pass |
+| 37491261678 | Cron, 10,000 schedules | NFR-3 | 56.67% ≤ 1 s, p99 2.47 s | Fail; twice tier M's largest burst |
+| 37491249332 | 200 workers × 60 slots, 10 s jobs | NFR-2, NFR-4 | Dispatch p99 200 ms, queue wait p99 359 ms | Pass |
+| 37492256545 | One pool, 1,000/s | NFR-4 | Dispatch p99 91 ms | Pass |
+
+### 23.5 Capacity model
+
+CPU per job below saturation, after tuning (runs 37491292387 and 37491249332):
+
+| Component | CPU per job | vCPUs at 5,000 jobs/s |
+|---|---|---|
+| PostgreSQL | 1.0–1.1 ms (1.6 ms on the saturated runner) | 5–5.5 (8 if contention inflates it as on the runner) |
+| `api` | 0.4 ms | 2 |
+| `engine`, both nodes | 0.4–0.5 ms | 2–2.5 |
+
+- **Database:** a primary with 8 vCPUs carries 5,000 jobs/s at about 65% CPU. That leaves headroom for maintenance and a failover's catch-up. The proposed production class is therefore 8 vCPUs, the low end of §19.4's earlier 8–16 estimate. In the deployment environment, set `db_instance_class = "db.m7g.2xlarge"` for the deciding run. The default `db.t4g.medium` serves functional environments only.
+- **Schedule jobs** cost about 1.8 ms of database CPU each in the cron runs:
+  - materialization, about 0.3 ms;
+  - promotion, about 0.15 ms;
+  - claim and completion;
+  - fixed background work (heartbeats, gauges, leases), which weighs more because those runs average only 83 jobs/s.
+- **Promotion throughput** on the runner: two engines promoted a boundary's 5,000 due jobs within about 0.5 s, and 10,000 within about 2.5 s, while dispatching them. Tier M's bursts are 2–5k.
+- **Timer store:** 300,000 future-dated rows left dispatch and database cost unchanged, because promotion reads `jobs_due_idx` from its due edge only. 10M rows were not seeded; they cost storage, not per-job work.
+- **Heartbeats:** 0.08 vCPU per 200 workers ([ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md)).
+
+### 23.6 Against NFR-1 to NFR-4
+
+| NFR | Target | Result | Verdict |
+|---|---|---|---|
+| NFR-1 | 115–580 jobs/s on average, bursts of 2–5k/s | 1,000 jobs/s sustained with every component on 4 vCPUs. 5,000/s projects to an 8-vCPU primary with `api` and engines scaled out. | Average met. The burst run that decides needs the deployment environment (§22). |
+| NFR-2 | ~10k running jobs, 200 workers, ~100k schedules, 10M future jobs | 10,000 running on 200 workers, dispatch p99 200 ms; 10,000 schedules firing together; 300,000 future jobs with no effect | Met where measured. 100k schedules and 10M future jobs are extrapolated from per-row costs. |
+| NFR-3 | Scheduling lag p99 ≤ 1 s | 5,000 fires at one boundary: p99 488 ms | Met at tier M's burst size |
+| NFR-4 | Dispatch latency p99 ≤ 1 s | 91–200 ms for bursts, 1 pool and 200 workers; 750 ms during a 5,000-fire boundary | Met |
+
+### 23.7 Limits and next steps
+
+- **Bursts above about 1,200 jobs/s** saturate the runner. They are decided in the deployment environment, where the database, nodes and load generator run on separate machines.
+- **10,000 fires at one boundary** take about 2.5 s to promote on the runner, against tier M bursts of 2–5k. The levers, in order:
+  1. jitter windows on such schedules ([HLD §11.6](architecture.md#116-precision-and-the-top-of-the-minute-spike));
+  2. more engine nodes;
+  3. parallel promoter batches within a node, safe since [ADR-033](decisions/ADR-033-deferring-split-overlap-decisions.md).
+- **Schedule creation per tenant is serialized** by the quota check's tenant lock. With 32 concurrent clients on one tenant, each create took 18 ms including the wait. Creation is not a hot path. A bulk-create endpoint would be the fix if it became one.
+- **One pool's dispatcher** sustained 1,000 jobs/s with a p99 of 91 ms, and the runner can't offer more. [HLD §15.3](architecture.md#153-scaling-each-tier) keeps leased pool partitions as the next step past one owner.
+
+### 23.8 Commands and tests
+
+- **Burst:** `gh workflow run loadtest.yml -f burst_rate=1000`.
+- **Cron:** `-f scenario=cron -f schedules=5000`.
+- **Future-dated volume:** `-f future=300000`.
+- **Worker scale:** `-f workers=200 -f slots=60 -f work=10s`.
+- **One pool:** `-f pools=1`.
+- The same variables drive `make loadtest`.
+- **Tests:**
+  - `TestSupplyRunsDryPerJobTypes`: rounds close a class per set of job types.
+  - `TestDefaultLookaheadMaterializesBetweenBoundaries`: the half-minute phase.
+  - `TestPromoterDefersRunsBehindAnEarlierDueRun`: fails without the deferral.
+  - `TestMinuteBoundaries` and `TestCronVerdict`: the gate's cron checks.

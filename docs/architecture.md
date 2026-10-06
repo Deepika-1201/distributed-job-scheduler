@@ -568,7 +568,8 @@ sequenceDiagram
 ### 11.6 Precision and the top-of-the-minute spike
 
 - **Lag budget:** promoter interval (≤ 250 ms) + promotion transaction + dispatcher pickup (~100 ms), which is well under 1 s.
-- Because schedules are materialized up to 2 min ahead, a spike at 00:00:00 costs batched state updates, not inserts plus schedule evaluation at the same instant.
+- Because schedules are materialized up to 2.5 min ahead, a spike at 00:00:00 costs batched state updates, not inserts plus schedule evaluation at the same instant. The extra half minute puts the materialization of fires at whole minutes at the half minute, so it never coincides with a boundary ([ADR-032](decisions/ADR-032-materialize-between-cron-boundaries.md)).
+- **Measured** ([LLD §23](low-level-design.md#23-capacity)): on a 4-vCPU test runner, 5,000 schedules firing at the same minute had a p99 lag of 0.49 s, and 10,000 a p99 of 2.5 s.
 - A herd much larger than tier M's bursts, such as 100k schedules at the same second, takes a few seconds to promote. Such a herd mostly turns into *queue wait* anyway, since only about 10k slots exist. Priority and capacity govern queue wait. Jitter windows are the recommended mitigation.
 - **LLD decision:** keep the promotion step (a small hot `READY` set and explicit metrics), or let the dispatcher claim due jobs directly (no promotion writes). See [Appendix C](#appendix-c--open-questions-for-the-lld).
 
@@ -603,7 +604,7 @@ Decision record: [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.md).
 
 ### 12.2 Worker sessions and leases
 
-- Each session has a lease (TTL 30 s). The dispatcher renews all of its sessions in one batched `UPDATE` per interval, so writes scale with engines, not workers.
+- Each session has a lease (TTL 30 s), renewed by the worker's heartbeat in a transaction of its own. Batching renewals per engine, so that writes scale with engines rather than workers, was measured in phase 14 and not adopted: at 200 workers, heartbeats cost about 0.08 vCPU of database time ([ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md)).
 - Attempts reference their session. The reaper expires sessions whose `lease_expires_at < now()` and marks their running attempts `LOST`.
 - A crashed worker and a disconnected worker look the same and follow the same path.
 
@@ -953,7 +954,7 @@ Each scenario lists detection, recovery, consistency, duplicate execution, corru
 | Timer store | Up to 10M rows | Indexed by `run_at`; mostly idle. |
 | History (30 days) | 300M–1.5B job rows, plus attempts | Hundreds of GB up to 1–2 TB, dominated by payloads. Time-partitioned. Payloads may be kept for less time than metadata (LLD). |
 
-**Load-test gate.** Before anything beyond the core is built, a walking skeleton must show one PostgreSQL primary sustaining 5k jobs/s bursts with p99 dispatch ≤ 1 s. If it can't, the architecture is revisited before further investment. The harness measured each job's CPU at about 1.5–1.65 ms on the database, 0.5 ms on `api` and 0.75 ms on the engines together. So 5k jobs/s needs a primary with about 8 vCPUs free for bursts, and the gate is decided in the deployment environment ([LLD §19.4](low-level-design.md#194-results)).
+**Load-test gate.** Before anything beyond the core is built, a walking skeleton must show one PostgreSQL primary sustaining 5k jobs/s bursts with p99 dispatch ≤ 1 s. If it can't, the architecture is revisited before further investment. After phase 14's tuning, the harness measures each job's CPU at about 1.0–1.1 ms on the database, 0.4 ms on `api` and 0.4–0.5 ms on the engines together. So 5k jobs/s needs a primary with about 5.5 vCPUs, which an 8-vCPU class carries at about 65%. The gate is decided in the deployment environment ([LLD §23](low-level-design.md#23-capacity)).
 
 ### 15.2 Backpressure and admission control
 
@@ -1359,7 +1360,7 @@ The same image and environment variables run under `docker compose` and on ECS.
 
 | ADR | Title | Status |
 |---|---|---|
-| [ADR-001](decisions/ADR-001-scheduler-architecture.md) | Scheduler architecture | Accepted |
+| [ADR-001](decisions/ADR-001-scheduler-architecture.md) | Scheduler architecture | Accepted; lookahead amended by ADR-032 |
 | [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.md) | Worker pull via dispatcher | Accepted |
 | [ADR-003](decisions/ADR-003-message-broker.md) | Message broker | Accepted |
 | [ADR-004](decisions/ADR-004-database.md) | Database | Accepted |
@@ -1389,6 +1390,9 @@ The same image and environment variables run under `docker compose` and on ECS.
 | [ADR-028](decisions/ADR-028-row-level-security.md) | Row-level security is not adopted in V1 | Accepted |
 | [ADR-029](decisions/ADR-029-riding-out-database-outages.md) | Workers ride out database outages; session expiry needs evidence | Accepted |
 | [ADR-030](decisions/ADR-030-ecs-on-fargate.md) | Container runtime: ECS on Fargate | Accepted |
+| [ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md) | Heartbeats stay one transaction each; renewals are not batched | Accepted |
+| [ADR-032](decisions/ADR-032-materialize-between-cron-boundaries.md) | Materialize 2.5 minutes ahead, between cron boundaries | Accepted |
+| [ADR-033](decisions/ADR-033-deferring-split-overlap-decisions.md) | Concurrent promoters defer overlap decisions that a batch boundary splits | Accepted |
 
 ## Appendix C — Open questions for the LLD
 

@@ -94,3 +94,9 @@
 - **Runner, final setup:** it sustains about 1,200 jobs/s with every component sharing 4 vCPUs. At 800 and 1,000 jobs/s the gate passes, with dispatch p99 under 100 ms.
 - **Per-job cost:** PostgreSQL 1.5–1.65 ms of CPU, `api` 0.45–0.55 ms and the engines together 0.75 ms. So 5,000 jobs/s needs about 8 vCPUs of database headroom; [LLD §19.4](../low-level-design.md#194-results) has the details.
 - **Verdict:** the architecture stands, with the primary sized for that headroom. The gate itself is decided in the deployment environment.
+
+## Update (2026-10-06, phase 14)
+
+- **The cut.** Phase 14 found dispatch rounds issuing an empty claim for every waiter that declares job types. Fixing that cut database CPU per job to 1.0–1.1 ms and the engines' to 0.4–0.5 ms.
+- **The new sizing.** 5,000 jobs/s now projects to an 8-vCPU primary at about 65% CPU ([LLD §23.5](../low-level-design.md#235-capacity-model)).
+- **The ceiling.** The runner's ceiling is still about 1,200 jobs/s, set by the shared machine.
