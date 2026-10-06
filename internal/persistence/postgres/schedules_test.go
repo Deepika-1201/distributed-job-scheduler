@@ -292,35 +292,52 @@ func TestOverlapPolicies(t *testing.T) {
 
 // Two promoters can split a schedule's due runs between their batches. The later run must
 // wait for the earlier one's decision, or skip would start both (ADR-033).
-func TestPromoterDefersRunsBehindAnEarlierDueRun(t *testing.T) {
+func TestConcurrentPromotersKeepFireOrder(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	skip := f.createSchedule()
-	allow := f.createSchedule(func(s *domain.Schedule) { s.Overlap = domain.OverlapAllow })
 	f.materialize()
 	f.makeDue(skip, 1)
-	f.makeDue(allow, 1)
 
-	// Another promoter's batch holds both schedules' first runs.
+	// Another promoter's batch holds the first run.
 	tx, err := f.pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	for _, sc := range []domain.Schedule{skip, allow} {
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM jobs WHERE schedule_id = $1 AND fire_time = $2 FOR UPDATE`, string(sc.ID), sc.CreatedAt); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM jobs WHERE schedule_id = $1 AND fire_time = $2 FOR UPDATE`, string(skip.ID), skip.CreatedAt); err != nil {
+		t.Fatal(err)
 	}
-	if st := f.promoteScheduled(); st.Promoted != 1 || st.Deferred != 1 || f.fireState(skip, 1) != domain.StateScheduled ||
-		f.fireState(allow, 1) != domain.StateReady {
-		t.Fatalf("stats %+v; want skip's fire 1 deferred and allow's promoted", st)
+	if st := f.promoteScheduled(); st.Total() != 0 || f.fireState(skip, 1) != domain.StateScheduled {
+		t.Fatalf("stats %+v, fire 1 %s; want fire 1 left to whoever holds fire 0", st, f.fireState(skip, 1))
 	}
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if st := f.promoteScheduled(); st.Promoted != 2 || st.Skipped != 1 || f.fireState(skip, 1) != domain.StateSkipped {
-		t.Errorf("stats %+v, skip's fire 1 %s; want both first runs promoted and fire 1 skipped", st, f.fireState(skip, 1))
+	if st := f.promoteScheduled(); st.Promoted != 1 || st.Skipped != 1 || f.fireState(skip, 1) != domain.StateSkipped {
+		t.Errorf("stats %+v, fire 1 %s; want fire 0 promoted and fire 1 skipped", st, f.fireState(skip, 1))
+	}
+}
+
+// A jitter window longer than the interval can make a later fire due before an earlier one. A
+// batch must still progress with that run first by run_at, even when it holds one job.
+func TestPromoterProgressesWhenALaterFireSortsFirst(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	sc := f.createSchedule()
+	f.materialize()
+	at := func(n int, ago string) {
+		f.exec(`UPDATE jobs SET run_at = now() - $3::interval WHERE schedule_id = $1 AND fire_time = $2`,
+			string(sc.ID), sc.CreatedAt.Add(time.Duration(n)*time.Minute), ago)
+	}
+	at(0, "1 second")
+	at(1, "10 seconds")
+	stats, err := f.store.PromoteScheduled(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Promoted != 1 || stats.Skipped != 1 || f.fireState(sc, 0) != domain.StateReady || f.fireState(sc, 1) != domain.StateSkipped {
+		t.Errorf("stats %+v; want fire 0 promoted and fire 1 skipped in one batch", stats)
 	}
 }
 

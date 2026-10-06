@@ -1392,7 +1392,7 @@ The same image and environment variables run under `docker compose` and on ECS.
 | [ADR-030](decisions/ADR-030-ecs-on-fargate.md) | Container runtime: ECS on Fargate | Accepted |
 | [ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md) | Heartbeats stay one transaction each; renewals are not batched | Accepted |
 | [ADR-032](decisions/ADR-032-materialize-between-cron-boundaries.md) | Materialize 2.5 minutes ahead, between cron boundaries | Accepted |
-| [ADR-033](decisions/ADR-033-deferring-split-overlap-decisions.md) | Concurrent promoters defer overlap decisions that a batch boundary splits | Accepted |
+| [ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md) | Promoters take each schedule by its earliest due run | Accepted |
 
 ## Appendix C — Open questions for the LLD
 

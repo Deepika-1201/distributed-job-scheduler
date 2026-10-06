@@ -73,49 +73,62 @@ func (s *Store) PromoteDue(ctx context.Context, limit int) (int, error) {
 	return len(lags), nil
 }
 
-// PromoteStats counts the outcomes of one PromoteScheduled batch. Deferred jobs were left
-// for a later batch, because an earlier due run of their schedule was outside this one.
+// PromoteStats counts the outcomes of one PromoteScheduled batch.
 type PromoteStats struct {
-	Promoted, Skipped, Buffered, Superseded, Deferred int
+	Promoted, Skipped, Buffered, Superseded int
 }
 
-// Total counts the jobs decided, which leaves out the deferred ones.
 func (p PromoteStats) Total() int { return p.Promoted + p.Skipped + p.Buffered + p.Superseded }
 
 type dueScheduleJob struct {
-	id       pgtype.UUID
-	schedule pgtype.UUID
-	fire     time.Time
-	policy   domain.OverlapPolicy
-	// Earlier runs of the schedule: active ones, waiting ones, and the waiting ones now due.
-	active, queued, due int
+	id             pgtype.UUID
+	schedule       pgtype.UUID
+	fire           time.Time
+	policy         domain.OverlapPolicy
+	active, queued int // for a schedule's earliest due run: earlier runs that are active, and that wait
 }
 
 // PromoteScheduled applies each schedule's overlap policy to its due jobs (LLD §10.4).
+//
+// A batch takes schedules by their earliest due run, the head, locked with SKIP LOCKED, and
+// then the schedule's later due runs. Holding the head gives one batch the schedule's
+// decisions, so concurrent promoters can't split them (ADR-033). Heads never wait behind
+// another run, so every batch makes progress. Each part is capped at limit jobs.
 func (s *Store) PromoteScheduled(ctx context.Context, limit int) (PromoteStats, error) {
 	var stats PromoteStats
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			WITH batch AS MATERIALIZED (
-			    SELECT id, schedule_id, fire_time FROM jobs
+			WITH heads AS MATERIALIZED (
+			    SELECT id, schedule_id, fire_time FROM jobs j
 			    WHERE state = 'SCHEDULED' AND run_at <= now() AND schedule_id IS NOT NULL
+			      AND NOT EXISTS (SELECT 1 FROM jobs p WHERE p.schedule_id = j.schedule_id AND p.fire_time < j.fire_time
+			          AND p.state = 'SCHEDULED' AND p.run_at <= now())
 			    ORDER BY run_at
 			    LIMIT $1
-			    FOR UPDATE SKIP LOCKED)
-			SELECT b.id, b.schedule_id, b.fire_time, s.overlap_policy, e.active, e.queued, e.due
-			FROM batch b JOIN schedules s ON s.id = b.schedule_id
+			    FOR UPDATE SKIP LOCKED
+			), later AS MATERIALIZED (
+			    SELECT j.id, j.schedule_id, j.fire_time FROM heads h JOIN jobs j ON j.schedule_id = h.schedule_id
+			    WHERE j.fire_time > h.fire_time AND j.state = 'SCHEDULED' AND j.run_at <= now()
+			    ORDER BY j.schedule_id, j.fire_time
+			    LIMIT $1
+			    FOR UPDATE OF j
+			)
+			SELECT h.id, h.schedule_id, h.fire_time, s.overlap_policy, e.active, e.queued
+			FROM heads h JOIN schedules s ON s.id = h.schedule_id
 			CROSS JOIN LATERAL (
 			    SELECT count(*) FILTER (WHERE p.state IN ('READY', 'RUNNING', 'RETRY_PENDING')) AS active,
-			        count(*) FILTER (WHERE p.state = 'SCHEDULED') AS queued,
-			        count(*) FILTER (WHERE p.state = 'SCHEDULED' AND p.run_at <= now()) AS due
-			    FROM jobs p WHERE p.schedule_id = b.schedule_id AND p.fire_time < b.fire_time) e`, limit)
+			        count(*) FILTER (WHERE p.state = 'SCHEDULED') AS queued
+			    FROM jobs p WHERE p.schedule_id = h.schedule_id AND p.fire_time < h.fire_time) e
+			UNION ALL
+			SELECT l.id, l.schedule_id, l.fire_time, s.overlap_policy, 0, 0
+			FROM later l JOIN schedules s ON s.id = l.schedule_id`, limit)
 		if err != nil {
 			return err
 		}
 		batch, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (dueScheduleJob, error) {
 			var d dueScheduleJob
 			var policy string
-			err := r.Scan(&d.id, &d.schedule, &d.fire, &policy, &d.active, &d.queued, &d.due)
+			err := r.Scan(&d.id, &d.schedule, &d.fire, &policy, &d.active, &d.queued)
 			d.policy = domain.OverlapPolicy(policy)
 			return d, err
 		})
@@ -123,8 +136,7 @@ func (s *Store) PromoteScheduled(ctx context.Context, limit int) (PromoteStats, 
 			return err
 		}
 		d := decideOverlaps(batch)
-		stats = PromoteStats{Promoted: len(d.promote), Skipped: len(d.skip), Buffered: len(d.buffer),
-			Superseded: len(d.supersede), Deferred: d.deferred}
+		stats = PromoteStats{Promoted: len(d.promote), Skipped: len(d.skip), Buffered: len(d.buffer), Superseded: len(d.supersede)}
 		return applyOverlaps(ctx, tx, d)
 	})
 	return stats, err
@@ -133,13 +145,11 @@ func (s *Store) PromoteScheduled(ctx context.Context, limit int) (PromoteStats, 
 type overlapDecisions struct {
 	promote, skip, buffer, supersede []pgtype.UUID
 	cancelBefore                     map[pgtype.UUID]time.Time // schedule → fire time whose earlier runs are cancelled
-	deferred                         int
 }
 
 // decideOverlaps applies the overlap policies, treating jobs promoted or buffered earlier in
-// the batch like runs that were already active or waiting. A schedule whose earlier due run
-// is outside the batch, because another promoter holds it or it sorts later by run_at, is
-// decided after that run: deciding now could start two runs under skip (ADR-033).
+// the batch like runs that were already active or waiting. Each schedule's first job in the
+// batch is its earliest due run, which carries the counts of the runs before it.
 func decideOverlaps(batch []dueScheduleJob) overlapDecisions {
 	slices.SortFunc(batch, func(a, b dueScheduleJob) int {
 		if c := strings.Compare(uuidString(a.schedule), uuidString(b.schedule)); c != 0 {
@@ -155,10 +165,6 @@ func decideOverlaps(batch []dueScheduleJob) overlapDecisions {
 		}
 		group := batch[start:end]
 		start = end
-		if group[0].due > 0 && group[0].policy != domain.OverlapAllow {
-			d.deferred += len(group)
-			continue
-		}
 		// Counts for later jobs include the earlier jobs of this batch, which were SCHEDULED.
 		active, waiting := group[0].active > 0, group[0].queued > 0
 		for i, j := range group {

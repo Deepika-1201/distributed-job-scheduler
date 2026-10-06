@@ -100,8 +100,7 @@ func NewPromoter(store Store, log *slog.Logger) *Loop {
 				attribute.Int("promoted", promoted), attribute.Int("schedule_jobs", stats.Total()))
 			log.Debug("promoted jobs", "expired", expired, "promoted", promoted, "schedule_jobs", stats)
 		}
-		// A batch of deferred jobs only is not progress: repeating it at once would spin.
-		scheduled := stats.Total() > 0 && stats.Total()+stats.Deferred == scheduleJobBatch
-		return expired == promoteBatch || promoted == promoteBatch || scheduled, nil
+		// A batch decides its heads plus their schedules' later due runs, so it can pass the limit.
+		return expired == promoteBatch || promoted == promoteBatch || stats.Total() >= scheduleJobBatch, nil
 	}}
 }

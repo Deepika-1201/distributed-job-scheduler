@@ -526,12 +526,14 @@ Every engine node runs one every 250 ms, and continuously while any step fills i
 |---|---|---|
 | Expire | Due `SCHEDULED` jobs and `READY` jobs whose `start_deadline` has passed and that have never started (1,000) | → `EXPIRED` (T18, T19) |
 | Promote | Due `RETRY_PENDING` jobs, and due `SCHEDULED` jobs without a schedule (1,000) | → `READY` (T3, T4) in one `UPDATE` |
-| Schedule jobs | Due `SCHEDULED` jobs with a schedule (500), with each schedule's overlap policy | See below |
+| Schedule jobs | Due `SCHEDULED` jobs with a schedule: up to 500 schedules by their earliest due run, plus up to 500 of their later due runs, with each schedule's overlap policy | See below |
 
 For schedule jobs, "an earlier run is active" means an earlier-fire job of the same schedule is `READY`, `RUNNING` or `RETRY_PENDING`. The batch is processed in `(schedule_id, fire_time)` order, and jobs promoted earlier in the batch count as active.
 
-- **Concurrent batches** ([ADR-033](decisions/ADR-033-deferring-split-overlap-decisions.md)): when a schedule has an earlier due `SCHEDULED` run outside the batch, held by another promoter or sorted later by jitter, its jobs in the batch are deferred: left `SCHEDULED` and decided after that run. `allow` is exempt. Deferred jobs don't count as progress, so a batch that decided nothing doesn't repeat at once.
-- **Batch query:** locks the due jobs first, then counts each locked job's earlier runs (active, waiting, and waiting but due) in one pass over `jobs_schedule_idx`.
+- **Heads** ([ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md)): a batch locks schedules by their head, the due `SCHEDULED` run with no earlier due `SCHEDULED` run of the same schedule. It takes heads in `run_at` order with `SKIP LOCKED`, then locks the heads' later due runs.
+  - Concurrent batches never split a schedule's decisions, since only the head's holder decides them.
+  - Heads never wait behind another run, so every batch progresses, even when jitter sorts a later fire first.
+- **Counts:** the earlier active and waiting runs are counted once per head, for the locked heads only, in one pass over `jobs_schedule_idx`.
 
 | Overlap policy | Earlier run active | Otherwise |
 |---|---|---|
@@ -1484,7 +1486,11 @@ Phase 14: tier M scenarios against NFR-1 to NFR-4 ([HLD §5](architecture.md#5-n
    - *Mechanism:* two correlated counts per due job, computed before locking. The batch select cost about 0.14 ms a job.
    - *Fix:* it now locks the batch first, then counts each locked job's earlier runs in one pass (§10.4).
    - *After:* about 0.03 ms a job.
-4. **Concurrent promoters could break overlap policies.** Found while reviewing the promoter: two batches could split one schedule's due runs. Fixed by deferral ([ADR-033](decisions/ADR-033-deferring-split-overlap-decisions.md)). This is a correctness fix, not a speed one.
+4. **Concurrent promoters could break overlap policies.** Found while reviewing the promoter: two batches could split one schedule's due runs.
+   - *First fix:* deferring the split runs. Its own test showed it could stall, when a batch filled with runs waiting on a lock or on a later-sorted earlier fire.
+   - *Final fix:* batches take each schedule by its earliest due run ([ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md)).
+
+   This is a correctness fix, not a speed one.
 5. **Heartbeats don't need batching.** Measured at about 1.9 ms of database time per heartbeat: 0.08 vCPU for 200 workers ([ADR-031](decisions/ADR-031-heartbeats-are-not-batched.md)).
 
 ### 23.4 Results
@@ -1546,7 +1552,7 @@ CPU per job below saturation, after tuning (runs 37491292387 and 37491249332):
 - **10,000 fires at one boundary** take about 2.5 s to promote on the runner, against tier M bursts of 2–5k. The levers, in order:
   1. jitter windows on such schedules ([HLD §11.6](architecture.md#116-precision-and-the-top-of-the-minute-spike));
   2. more engine nodes;
-  3. parallel promoter batches within a node, safe since [ADR-033](decisions/ADR-033-deferring-split-overlap-decisions.md).
+  3. parallel promoter batches within a node, safe since [ADR-033](decisions/ADR-033-promoting-each-schedule-from-its-earliest-due-run.md).
 - **Schedule creation per tenant is serialized** by the quota check's tenant lock. With 32 concurrent clients on one tenant, each create took 18 ms including the wait. Creation is not a hot path. A bulk-create endpoint would be the fix if it became one.
 - **One pool's dispatcher** sustained 1,000 jobs/s with a p99 of 91 ms, and the runner can't offer more. [HLD §15.3](architecture.md#153-scaling-each-tier) keeps leased pool partitions as the next step past one owner.
 
@@ -1561,5 +1567,5 @@ CPU per job below saturation, after tuning (runs 37491292387 and 37491249332):
 - **Tests:**
   - `TestSupplyRunsDryPerJobTypes`: rounds close a class per set of job types.
   - `TestDefaultLookaheadMaterializesBetweenBoundaries`: the half-minute phase.
-  - `TestPromoterDefersRunsBehindAnEarlierDueRun`: fails without the deferral.
+  - `TestConcurrentPromotersKeepFireOrder` and `TestPromoterProgressesWhenALaterFireSortsFirst`: the original promoter fails both, and the deferral version fails the second.
   - `TestMinuteBoundaries` and `TestCronVerdict`: the gate's cron checks.
