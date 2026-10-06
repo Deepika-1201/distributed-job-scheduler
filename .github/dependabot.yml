@@ -7,6 +7,10 @@ updates:
     groups:
       opentelemetry:
         patterns: ["go.opentelemetry.io/*"]
+    ignore:
+      # GO-2026-6443; stay on 1.83.x until a fixed release (LLD §20.6).
+      - dependency-name: google.golang.org/grpc
+        versions: ["1.84.x"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

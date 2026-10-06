@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       # Embedded PostgreSQL binaries (internal/pgtest); go.sum pins their version.
@@ -76,7 +76,7 @@ jobs:
       JS_DB_MAX_CONNS: "10"
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: make loadtest-smoke
