@@ -172,8 +172,13 @@ type RegisterResponse struct {
 	SessionId         string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	LeaseTtl          *durationpb.Duration   `protobuf:"bytes,2,opt,name=lease_ttl,json=leaseTtl,proto3" json:"lease_ttl,omitempty"`
 	HeartbeatInterval *durationpb.Duration   `protobuf:"bytes,3,opt,name=heartbeat_interval,json=heartbeatInterval,proto3" json:"heartbeat_interval,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The engine node that opened, and so last renewed, the session.
+	NodeId string `protobuf:"bytes,4,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	// How long the worker may keep running jobs while the node that last renewed its session
+	// reports the database unavailable (ADR-029). Zero means the lease TTL applies.
+	OutageTolerance *durationpb.Duration `protobuf:"bytes,5,opt,name=outage_tolerance,json=outageTolerance,proto3" json:"outage_tolerance,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RegisterResponse) Reset() {
@@ -223,6 +228,20 @@ func (x *RegisterResponse) GetLeaseTtl() *durationpb.Duration {
 func (x *RegisterResponse) GetHeartbeatInterval() *durationpb.Duration {
 	if x != nil {
 		return x.HeartbeatInterval
+	}
+	return nil
+}
+
+func (x *RegisterResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *RegisterResponse) GetOutageTolerance() *durationpb.Duration {
+	if x != nil {
+		return x.OutageTolerance
 	}
 	return nil
 }
@@ -633,7 +652,9 @@ type HeartbeatResponse struct {
 	// Attempts that are no longer current: stop them and drop their results.
 	Stale []string `protobuf:"bytes,2,rep,name=stale,proto3" json:"stale,omitempty"`
 	// An operator asked this worker to drain: stop polling, finish running jobs, deregister.
-	Drain         bool `protobuf:"varint,3,opt,name=drain,proto3" json:"drain,omitempty"`
+	Drain bool `protobuf:"varint,3,opt,name=drain,proto3" json:"drain,omitempty"`
+	// The engine node that renewed the session.
+	NodeId        string `protobuf:"bytes,4,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -687,6 +708,13 @@ func (x *HeartbeatResponse) GetDrain() bool {
 		return x.Drain
 	}
 	return false
+}
+
+func (x *HeartbeatResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
 }
 
 type CompleteRequest struct {
@@ -948,12 +976,14 @@ const file_jobscheduler_worker_v1_worker_proto_rawDesc = "" +
 	"\x0fruntime_version\x18\x06 \x01(\tR\x0eruntimeVersion\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb3\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x92\x02\n" +
 	"\x10RegisterResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x126\n" +
 	"\tlease_ttl\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\bleaseTtl\x12H\n" +
-	"\x12heartbeat_interval\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x11heartbeatInterval\"v\n" +
+	"\x12heartbeat_interval\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x11heartbeatInterval\x12\x17\n" +
+	"\anode_id\x18\x04 \x01(\tR\x06nodeId\x12D\n" +
+	"\x10outage_tolerance\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\x0foutageTolerance\"v\n" +
 	"\vPollRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
@@ -995,11 +1025,12 @@ const file_jobscheduler_worker_v1_worker_proto_rawDesc = "" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x02 \x01(\tR\tattemptId\x12%\n" +
-	"\x0eattempt_number\x18\x03 \x01(\x03R\rattemptNumber\"W\n" +
+	"\x0eattempt_number\x18\x03 \x01(\x03R\rattemptNumber\"p\n" +
 	"\x11HeartbeatResponse\x12\x16\n" +
 	"\x06cancel\x18\x01 \x03(\tR\x06cancel\x12\x14\n" +
 	"\x05stale\x18\x02 \x03(\tR\x05stale\x12\x14\n" +
-	"\x05drain\x18\x03 \x01(\bR\x05drain\"\xd0\x02\n" +
+	"\x05drain\x18\x03 \x01(\bR\x05drain\x12\x17\n" +
+	"\anode_id\x18\x04 \x01(\tR\x06nodeId\"\xd0\x02\n" +
 	"\x0fCompleteRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +
@@ -1071,31 +1102,32 @@ var file_jobscheduler_worker_v1_worker_proto_depIdxs = []int32{
 	13, // 0: jobscheduler.worker.v1.RegisterRequest.labels:type_name -> jobscheduler.worker.v1.RegisterRequest.LabelsEntry
 	15, // 1: jobscheduler.worker.v1.RegisterResponse.lease_ttl:type_name -> google.protobuf.Duration
 	15, // 2: jobscheduler.worker.v1.RegisterResponse.heartbeat_interval:type_name -> google.protobuf.Duration
-	15, // 3: jobscheduler.worker.v1.PollRequest.wait:type_name -> google.protobuf.Duration
-	5,  // 4: jobscheduler.worker.v1.PollResponse.assignments:type_name -> jobscheduler.worker.v1.Assignment
-	15, // 5: jobscheduler.worker.v1.PollResponse.retry_after:type_name -> google.protobuf.Duration
-	14, // 6: jobscheduler.worker.v1.Assignment.labels:type_name -> jobscheduler.worker.v1.Assignment.LabelsEntry
-	16, // 7: jobscheduler.worker.v1.Assignment.deadline:type_name -> google.protobuf.Timestamp
-	15, // 8: jobscheduler.worker.v1.Assignment.timeout:type_name -> google.protobuf.Duration
-	16, // 9: jobscheduler.worker.v1.Assignment.fire_time:type_name -> google.protobuf.Timestamp
-	7,  // 10: jobscheduler.worker.v1.HeartbeatRequest.running:type_name -> jobscheduler.worker.v1.RunningAttempt
-	0,  // 11: jobscheduler.worker.v1.CompleteRequest.outcome:type_name -> jobscheduler.worker.v1.Outcome
-	15, // 12: jobscheduler.worker.v1.CompleteRequest.retry_after:type_name -> google.protobuf.Duration
-	1,  // 13: jobscheduler.worker.v1.WorkerService.Register:input_type -> jobscheduler.worker.v1.RegisterRequest
-	3,  // 14: jobscheduler.worker.v1.WorkerService.Poll:input_type -> jobscheduler.worker.v1.PollRequest
-	6,  // 15: jobscheduler.worker.v1.WorkerService.Heartbeat:input_type -> jobscheduler.worker.v1.HeartbeatRequest
-	9,  // 16: jobscheduler.worker.v1.WorkerService.Complete:input_type -> jobscheduler.worker.v1.CompleteRequest
-	11, // 17: jobscheduler.worker.v1.WorkerService.Deregister:input_type -> jobscheduler.worker.v1.DeregisterRequest
-	2,  // 18: jobscheduler.worker.v1.WorkerService.Register:output_type -> jobscheduler.worker.v1.RegisterResponse
-	4,  // 19: jobscheduler.worker.v1.WorkerService.Poll:output_type -> jobscheduler.worker.v1.PollResponse
-	8,  // 20: jobscheduler.worker.v1.WorkerService.Heartbeat:output_type -> jobscheduler.worker.v1.HeartbeatResponse
-	10, // 21: jobscheduler.worker.v1.WorkerService.Complete:output_type -> jobscheduler.worker.v1.CompleteResponse
-	12, // 22: jobscheduler.worker.v1.WorkerService.Deregister:output_type -> jobscheduler.worker.v1.DeregisterResponse
-	18, // [18:23] is the sub-list for method output_type
-	13, // [13:18] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	15, // 3: jobscheduler.worker.v1.RegisterResponse.outage_tolerance:type_name -> google.protobuf.Duration
+	15, // 4: jobscheduler.worker.v1.PollRequest.wait:type_name -> google.protobuf.Duration
+	5,  // 5: jobscheduler.worker.v1.PollResponse.assignments:type_name -> jobscheduler.worker.v1.Assignment
+	15, // 6: jobscheduler.worker.v1.PollResponse.retry_after:type_name -> google.protobuf.Duration
+	14, // 7: jobscheduler.worker.v1.Assignment.labels:type_name -> jobscheduler.worker.v1.Assignment.LabelsEntry
+	16, // 8: jobscheduler.worker.v1.Assignment.deadline:type_name -> google.protobuf.Timestamp
+	15, // 9: jobscheduler.worker.v1.Assignment.timeout:type_name -> google.protobuf.Duration
+	16, // 10: jobscheduler.worker.v1.Assignment.fire_time:type_name -> google.protobuf.Timestamp
+	7,  // 11: jobscheduler.worker.v1.HeartbeatRequest.running:type_name -> jobscheduler.worker.v1.RunningAttempt
+	0,  // 12: jobscheduler.worker.v1.CompleteRequest.outcome:type_name -> jobscheduler.worker.v1.Outcome
+	15, // 13: jobscheduler.worker.v1.CompleteRequest.retry_after:type_name -> google.protobuf.Duration
+	1,  // 14: jobscheduler.worker.v1.WorkerService.Register:input_type -> jobscheduler.worker.v1.RegisterRequest
+	3,  // 15: jobscheduler.worker.v1.WorkerService.Poll:input_type -> jobscheduler.worker.v1.PollRequest
+	6,  // 16: jobscheduler.worker.v1.WorkerService.Heartbeat:input_type -> jobscheduler.worker.v1.HeartbeatRequest
+	9,  // 17: jobscheduler.worker.v1.WorkerService.Complete:input_type -> jobscheduler.worker.v1.CompleteRequest
+	11, // 18: jobscheduler.worker.v1.WorkerService.Deregister:input_type -> jobscheduler.worker.v1.DeregisterRequest
+	2,  // 19: jobscheduler.worker.v1.WorkerService.Register:output_type -> jobscheduler.worker.v1.RegisterResponse
+	4,  // 20: jobscheduler.worker.v1.WorkerService.Poll:output_type -> jobscheduler.worker.v1.PollResponse
+	8,  // 21: jobscheduler.worker.v1.WorkerService.Heartbeat:output_type -> jobscheduler.worker.v1.HeartbeatResponse
+	10, // 22: jobscheduler.worker.v1.WorkerService.Complete:output_type -> jobscheduler.worker.v1.CompleteResponse
+	12, // 23: jobscheduler.worker.v1.WorkerService.Deregister:output_type -> jobscheduler.worker.v1.DeregisterResponse
+	19, // [19:24] is the sub-list for method output_type
+	14, // [14:19] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_jobscheduler_worker_v1_worker_proto_init() }

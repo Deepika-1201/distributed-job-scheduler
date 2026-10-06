@@ -25,6 +25,9 @@ const (
 	SingletonTTL = 30 * time.Second
 	// Margin is how long before the database expiry a holder stops acting on a lease.
 	Margin = 2 * time.Second
+	// OutageTolerance is how long a worker session may outlive its lease while the engine that
+	// renewed it can't reach the database: NFR-8's recovery time (ADR-029).
+	OutageTolerance = 5 * time.Minute
 )
 
 type Config struct {

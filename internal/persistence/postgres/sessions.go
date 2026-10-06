@@ -40,10 +40,10 @@ func (s *Store) CreateSession(ctx context.Context, ws domain.WorkerSession, ttl 
 		labels = map[string]string{}
 	}
 	return scanSession(s.pool.QueryRow(ctx, `
-		INSERT INTO worker_sessions (id, pool, worker_id, job_types, slots, labels, runtime_version, state, lease_expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE', now() + make_interval(secs => $8))
+		INSERT INTO worker_sessions (id, pool, worker_id, job_types, slots, labels, runtime_version, state, lease_expires_at, renewed_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE', now() + make_interval(secs => $8), NULLIF($9, ''))
 		RETURNING `+sessionColumns,
-		newID(), ws.Pool, ws.WorkerID, jobTypes, ws.Slots, labels, ws.RuntimeVersion, ttl.Seconds()))
+		newID(), ws.Pool, ws.WorkerID, jobTypes, ws.Slots, labels, ws.RuntimeVersion, ttl.Seconds(), ws.RenewedBy))
 }
 
 // GetActiveSession returns a session that is still active; others are reported as not found.
@@ -75,8 +75,8 @@ const unreportedGrace = 15 * time.Second
 
 // Heartbeat renews an active session's lease and reconciles the attempts the worker reports
 // holding with those the database assigns to it. A non-empty pool limits it to that pool's
-// sessions (ADR-025).
-func (s *Store) Heartbeat(ctx context.Context, id domain.SessionID, pool string, held []AttemptRef, ttl time.Duration) (HeartbeatResult, error) {
+// sessions (ADR-025); node is the engine renewing it (ADR-029).
+func (s *Store) Heartbeat(ctx context.Context, id domain.SessionID, pool, node string, held []AttemptRef, ttl time.Duration) (HeartbeatResult, error) {
 	sid, ok := canonicalUUID(string(id))
 	if !ok {
 		return HeartbeatResult{}, domain.ErrNotFound
@@ -85,9 +85,10 @@ func (s *Store) Heartbeat(ctx context.Context, id domain.SessionID, pool string,
 	var res HeartbeatResult
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
-			UPDATE worker_sessions SET heartbeat_at = now(), lease_expires_at = now() + make_interval(secs => $2)
+			UPDATE worker_sessions SET heartbeat_at = now(), lease_expires_at = now() + make_interval(secs => $2),
+			    renewed_by = NULLIF($4, '')
 			WHERE id = $1 AND state = 'ACTIVE' AND ($3 = '' OR pool = $3)
-			RETURNING draining`, sid, ttl.Seconds(), pool).Scan(&res.Drain)
+			RETURNING draining`, sid, ttl.Seconds(), pool, node).Scan(&res.Drain)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.ErrNotFound
 		}

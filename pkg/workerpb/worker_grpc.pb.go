@@ -34,6 +34,9 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // WorkerService requires "authorization: Bearer <worker token>" metadata on every call.
+//
+// An engine that can't reach the database answers UNAVAILABLE with a google.rpc.ErrorInfo of
+// domain "jobscheduler", reason "DATABASE_UNAVAILABLE" and metadata "node_id" (ADR-029).
 type WorkerServiceClient interface {
 	// Register opens a session with a pool. Any engine node serves it.
 	Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*RegisterResponse, error)
@@ -111,6 +114,9 @@ func (c *workerServiceClient) Deregister(ctx context.Context, in *DeregisterRequ
 // for forward compatibility.
 //
 // WorkerService requires "authorization: Bearer <worker token>" metadata on every call.
+//
+// An engine that can't reach the database answers UNAVAILABLE with a google.rpc.ErrorInfo of
+// domain "jobscheduler", reason "DATABASE_UNAVAILABLE" and metadata "node_id" (ADR-029).
 type WorkerServiceServer interface {
 	// Register opens a session with a pool. Any engine node serves it.
 	Register(context.Context, *RegisterRequest) (*RegisterResponse, error)

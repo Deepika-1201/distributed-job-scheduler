@@ -37,6 +37,7 @@ var ctx = context.Background()
 
 type cluster struct {
 	t      *testing.T
+	url    string
 	store  *postgres.Store
 	tenant domain.TenantID
 }
@@ -45,7 +46,8 @@ type cluster struct {
 // with fast retries, and a promoter so retries become READY again.
 func newCluster(t *testing.T) *cluster {
 	t.Helper()
-	pool, err := postgres.NewPool(ctx, pgtest.NewDatabase(t), 32)
+	url := pgtest.NewDatabase(t)
+	pool, err := postgres.NewPool(ctx, url, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +67,7 @@ func newCluster(t *testing.T) *cluster {
 		postgres.Audit{Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	c := &cluster{t: t, store: store, tenant: tenant}
+	c := &cluster{t: t, url: url, store: store, tenant: tenant}
 	c.run(scheduling.NewPromoter(store, slog.New(slog.DiscardHandler)).Run)
 	return c
 }
@@ -87,6 +89,10 @@ func (c *cluster) engine(node string, mods ...func(*dispatch.Config)) string {
 
 // stoppableEngine starts an engine node and returns its address and a graceful stop.
 func (c *cluster) stoppableEngine(node string, mods ...func(*dispatch.Config)) (string, func()) {
+	return c.startEngine(c.store, node, mods...)
+}
+
+func (c *cluster) startEngine(store *postgres.Store, node string, mods ...func(*dispatch.Config)) (string, func()) {
 	c.t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -97,7 +103,7 @@ func (c *cluster) stoppableEngine(node string, mods ...func(*dispatch.Config)) (
 	for _, mod := range mods {
 		mod(&cfg)
 	}
-	d, err := dispatch.New(c.store, cfg, slog.New(slog.DiscardHandler))
+	d, err := dispatch.New(store, cfg, slog.New(slog.DiscardHandler))
 	if err != nil {
 		c.t.Fatal(err)
 	}

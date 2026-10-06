@@ -1,6 +1,6 @@
 # ADR-014: Worker protocol: unary calls, long-poll and owner redirects
 
-- **Status:** Accepted. Amends the worker-protocol row of [ADR-012](ADR-012-language-and-core-libraries.md). Resolves HLD open questions 7 and 8. Amended by [ADR-023](ADR-023-session-calls-fall-back-to-the-owner.md) (session calls fall back to the owner) and [ADR-025](ADR-025-per-pool-worker-tokens.md) (per-pool worker tokens).
+- **Status:** Accepted. Amends the worker-protocol row of [ADR-012](ADR-012-language-and-core-libraries.md). Resolves HLD open questions 7 and 8. Amended by [ADR-023](ADR-023-session-calls-fall-back-to-the-owner.md) (session calls fall back to the owner), [ADR-025](ADR-025-per-pool-worker-tokens.md) (per-pool worker tokens) and [ADR-029](ADR-029-riding-out-database-outages.md) (database outages).
 - **Date:** 2026-09-26
 - **Related:** [ADR-002](ADR-002-worker-pull-via-dispatcher.md), [ADR-006](ADR-006-leader-election.md), [HLD §12](../architecture.md#12-worker-architecture), [LLD §12.1](../low-level-design.md#121-protocol), [protocol definition](../../proto/jobscheduler/worker/v1/worker.proto)
 

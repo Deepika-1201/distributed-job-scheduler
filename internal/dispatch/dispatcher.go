@@ -17,6 +17,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -44,6 +45,8 @@ type Config struct {
 	MaxPollWait       time.Duration // default 30 s
 	MetricsInterval   time.Duration // how often gauges are sampled, default 10 s
 	BacklogTarget     time.Duration // pools without their own target, default 5 min (ADR-021)
+	PoolLeaseTTL      time.Duration // default 10 s; owners stop acting a fifth of it early
+	OutageTolerance   time.Duration // default 5 min (ADR-029)
 	Weights           domain.PriorityWeights
 }
 
@@ -66,6 +69,12 @@ func (c *Config) setDefaults() {
 	if c.BacklogTarget == 0 {
 		c.BacklogTarget = 5 * time.Minute
 	}
+	if c.PoolLeaseTTL == 0 {
+		c.PoolLeaseTTL = coordination.PoolTTL
+	}
+	if c.OutageTolerance == 0 {
+		c.OutageTolerance = coordination.OutageTolerance
+	}
 	if c.Weights == nil {
 		c.Weights = domain.DefaultPriorityWeights()
 	}
@@ -78,6 +87,11 @@ const (
 	capsRefresh     = 10 * time.Second
 	wantedRefresh   = 3 * time.Second
 	shutdownTimeout = 5 * time.Second
+	// callHeadroom is how long before a worker's deadline the engine gives up on the database and
+	// answers DATABASE_UNAVAILABLE, at most a quarter of the time left: a stalled database is
+	// then explained rather than timed out (ADR-029).
+	callHeadroom = time.Second
+	beatTimeout  = time.Second
 )
 
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,99}$`)
@@ -102,6 +116,9 @@ type Dispatcher struct {
 	capsFetched time.Time
 
 	node atomic.Pointer[nodeSample]
+
+	explainMu   sync.Mutex
+	explainedAt time.Time // when a worker was last told the database is unavailable
 }
 
 func New(store *postgres.Store, cfg Config, log *slog.Logger) (*Dispatcher, error) {
@@ -117,7 +134,7 @@ func New(store *postgres.Store, cfg Config, log *slog.Logger) (*Dispatcher, erro
 	d.auth = newWorkerAuth(cfg.Token, store, time.Now, d.log)
 	d.leases = coordination.NewManager(store, coordination.Config{
 		Name: "pool-leases", Holder: cfg.NodeID, Address: cfg.AdvertiseAddr,
-		TTL: coordination.PoolTTL, Margin: coordination.Margin,
+		TTL: cfg.PoolLeaseTTL, Margin: cfg.PoolLeaseTTL / 5,
 		Wanted: d.wantedPools, OnAcquired: d.startPool, OnLost: d.stopPool,
 	}, log)
 	opts := []grpc.ServerOption{grpc.StatsHandler(observability.GRPCServerHandler()), grpc.UnaryInterceptor(d.authenticate)}
@@ -141,6 +158,8 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	defer func() { _ = gauges.Unregister() }()
 	leaseCtx, stopLeases := context.WithCancel(context.WithoutCancel(ctx))
 	var wg sync.WaitGroup
+	last := d.beatOnce(ctx, postgres.NodeBeat{})
+	wg.Go(func() { d.beat(ctx, last) })
 	wg.Go(func() { _ = d.leases.Run(leaseCtx) })
 	wg.Go(func() { d.refreshWanted(ctx) })
 	wg.Go(func() { d.sampleNode(ctx) })
@@ -160,24 +179,93 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	case <-time.After(shutdownTimeout):
 		d.server.Stop()
 	}
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+	if err := d.store.StopNode(stopCtx, d.cfg.NodeID); err != nil {
+		d.log.Warn("recording the node's stop failed; its sessions expire after the outage tolerance", "error", err)
+	}
 	return err
 }
 
+// beat records this node's liveness every heartbeat interval: the evidence that lets reapers
+// expire sessions it renewed. It pauses for one session TTL after a worker was told the
+// database is unavailable, while that worker may be riding out the outage (ADR-029).
+func (d *Dispatcher) beat(ctx context.Context, last postgres.NodeBeat) {
+	for sleep(ctx, d.cfg.HeartbeatInterval) {
+		d.explainMu.Lock()
+		paused := !d.explainedAt.IsZero() && time.Since(d.explainedAt) < d.cfg.SessionTTL
+		d.explainMu.Unlock()
+		if !paused {
+			last = d.beatOnce(ctx, last)
+		}
+	}
+}
+
+func (d *Dispatcher) beatOnce(ctx context.Context, last postgres.NodeBeat) postgres.NodeBeat {
+	b, _, err := d.store.BeatNode(ctx, d.cfg.NodeID, last, beatTimeout)
+	if err != nil && ctx.Err() == nil {
+		d.log.Debug("recording the node's liveness failed", "error", err)
+	}
+	return b
+}
+
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// dbUnavailable tells a worker its call failed because this node can't reach the database, so
+// the worker may ride the outage out rather than self-fence (ADR-029).
+func (d *Dispatcher) dbUnavailable() error {
+	d.explainMu.Lock()
+	d.explainedAt = time.Now()
+	d.explainMu.Unlock()
+	st, err := status.New(codes.Unavailable, "the database is unavailable").WithDetails(&errdetails.ErrorInfo{
+		Reason: workerpb.ReasonDatabaseUnavailable, Domain: workerpb.ErrorDomain,
+		Metadata: map[string]string{workerpb.MetadataNodeID: d.cfg.NodeID},
+	})
+	if err != nil {
+		return status.Error(codes.Unavailable, "the database is unavailable")
+	}
+	return st.Err()
+}
+
+// authenticate checks the worker's token, then runs the call with a deadline callHeadroom
+// before the worker's: a database that hasn't answered by then is reported as unavailable.
 func (d *Dispatcher) authenticate(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	md, _ := metadata.FromIncomingContext(ctx)
 	got := md.Get("authorization")
 	if len(got) != 1 {
 		return nil, status.Error(codes.Unauthenticated, errUnauthenticated.Error())
 	}
-	s, err := d.auth.authenticate(ctx, got[0])
+	callCtx := ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithDeadline(ctx, deadline.Add(-min(callHeadroom, time.Until(deadline)/4)))
+		defer cancel()
+	}
+	timedOut := func() bool { return callCtx.Err() != nil && ctx.Err() == nil }
+	s, err := d.auth.authenticate(callCtx, got[0])
 	switch {
 	case errors.Is(err, errUnauthenticated):
 		return nil, status.Error(codes.Unauthenticated, err.Error())
+	case err != nil && (postgres.IsUnavailable(err) || timedOut()):
+		return nil, d.dbUnavailable()
 	case err != nil:
 		d.log.Error("checking a worker token failed", "error", err)
 		return nil, status.Error(codes.Unavailable, "cannot check the worker token now")
 	}
-	return handler(context.WithValue(ctx, scopeKey{}, s), req)
+	resp, err := handler(context.WithValue(callCtx, scopeKey{}, s), req)
+	if err != nil && timedOut() {
+		return nil, d.dbUnavailable()
+	}
+	return resp, err
 }
 
 func denied(pool string) error {
@@ -202,15 +290,16 @@ func (d *Dispatcher) Register(ctx context.Context, req *workerpb.RegisterRequest
 		return nil, denied(req.Pool)
 	}
 	ws, err := d.store.CreateSession(ctx, domain.WorkerSession{Pool: req.Pool, WorkerID: truncate(req.WorkerId, 200),
-		JobTypes: req.JobTypes, Slots: int(req.Slots), Labels: req.Labels, RuntimeVersion: truncate(req.RuntimeVersion, 100)},
-		d.cfg.SessionTTL)
+		JobTypes: req.JobTypes, Slots: int(req.Slots), Labels: req.Labels, RuntimeVersion: truncate(req.RuntimeVersion, 100),
+		RenewedBy: d.cfg.NodeID}, d.cfg.SessionTTL)
 	if err != nil {
 		return nil, d.toStatus(err)
 	}
 	d.want(req.Pool)
 	d.log.Info("worker registered", "session_id", ws.ID, "pool", ws.Pool, "worker_id", ws.WorkerID, "slots", ws.Slots)
 	return &workerpb.RegisterResponse{SessionId: string(ws.ID), LeaseTtl: durationpb.New(d.cfg.SessionTTL),
-		HeartbeatInterval: durationpb.New(d.cfg.HeartbeatInterval)}, nil
+		HeartbeatInterval: durationpb.New(d.cfg.HeartbeatInterval), NodeId: d.cfg.NodeID,
+		OutageTolerance: durationpb.New(d.cfg.OutageTolerance)}, nil
 }
 
 func (d *Dispatcher) Poll(ctx context.Context, req *workerpb.PollRequest) (*workerpb.PollResponse, error) {
@@ -264,11 +353,11 @@ func (d *Dispatcher) Heartbeat(ctx context.Context, req *workerpb.HeartbeatReque
 	for i, r := range req.Running {
 		held[i] = postgres.AttemptRef{JobID: domain.JobID(r.JobId), AttemptID: domain.AttemptID(r.AttemptId)}
 	}
-	res, err := d.store.Heartbeat(ctx, domain.SessionID(req.SessionId), scopeOf(ctx).storePool(), held, d.cfg.SessionTTL)
+	res, err := d.store.Heartbeat(ctx, domain.SessionID(req.SessionId), scopeOf(ctx).storePool(), d.cfg.NodeID, held, d.cfg.SessionTTL)
 	if err != nil {
 		return nil, d.toStatus(err)
 	}
-	resp := &workerpb.HeartbeatResponse{Drain: res.Drain}
+	resp := &workerpb.HeartbeatResponse{Drain: res.Drain, NodeId: d.cfg.NodeID}
 	for _, id := range res.Cancel {
 		resp.Cancel = append(resp.Cancel, string(id))
 	}
@@ -329,6 +418,8 @@ func (d *Dispatcher) toStatus(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return status.FromContextError(err).Err()
+	case postgres.IsUnavailable(err):
+		return d.dbUnavailable()
 	}
 	d.log.Error("worker call failed", "error", err)
 	return status.Error(codes.Internal, "internal error")

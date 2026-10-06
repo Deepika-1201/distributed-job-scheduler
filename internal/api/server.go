@@ -41,6 +41,9 @@ type Config struct {
 	Addr string
 	// TLS reports that the API is served over TLS, which adds HSTS (ADR-026).
 	TLS bool
+	// RequestTimeout bounds each request, default 10 s: a stalled database then answers 503
+	// rather than holding requests until the server's write timeout (LLD §21.2).
+	RequestTimeout time.Duration
 }
 
 type Server struct {
@@ -55,10 +58,12 @@ type Server struct {
 	routes    []string
 	addr      string
 	hsts      bool
+	timeout   time.Duration
 }
 
 func New(store *postgres.Store, log *slog.Logger, cfg Config) *Server {
-	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux(), addr: cfg.Addr, hsts: cfg.TLS}
+	s := &Server{store: store, log: log, now: time.Now, mux: http.NewServeMux(), addr: cfg.Addr, hsts: cfg.TLS,
+		timeout: cmp.Or(cfg.RequestTimeout, 10*time.Second)}
 	s.auth = newAuthenticator(store, s.now)
 	s.limiter = newRateLimiter(s.now)
 	s.schemas = &schemaCache{}
@@ -129,6 +134,10 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request, p principal) error
 func (s *Server) handle(pattern string, minRole domain.Role, h handlerFunc) {
 	s.routes = append(s.routes, pattern)
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		clientCtx := r.Context()
+		ctx, cancel := context.WithTimeout(clientCtx, s.timeout)
+		defer cancel()
+		r = r.WithContext(ctx)
 		p, err := s.auth.authenticate(r.Context(), r.Header.Get("Authorization"))
 		if err == nil && !p.Role.Includes(minRole) {
 			err = errPermission("this operation requires the %s role", minRole)
@@ -148,10 +157,13 @@ func (s *Server) handle(pattern string, minRole domain.Role, h handlerFunc) {
 		}
 		if err != nil {
 			ae := toAPIError(err)
+			if ae == errInternal && ctx.Err() != nil && clientCtx.Err() == nil {
+				ae = errUnavailable // our deadline passed: the database didn't answer in time
+			}
 			if ae == errInternal {
 				s.log.Error("request failed", "request_id", requestID(r), "error", err)
 			}
-			if pattern == submitRoute && p.Tenant != "" {
+			if pattern == submitRoute && p.Tenant != "" && ae != errUnavailable {
 				countRejection(r, p.Tenant, ae)
 			}
 			writeError(w, r, ae)

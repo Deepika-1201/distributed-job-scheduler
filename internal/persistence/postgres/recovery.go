@@ -17,13 +17,19 @@ import (
 // Ping checks database connectivity.
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
-// ExpireSessions marks up to limit active sessions whose lease has passed as EXPIRED (LLD §13.1).
-func (s *Store) ExpireSessions(ctx context.Context, limit int) (int, error) {
+// ExpireSessions marks up to limit active sessions whose lease has passed as EXPIRED (LLD §13.1),
+// when there is evidence the worker, not its engine, failed to renew: the engine that last
+// renewed the session stopped, or recorded its liveness after the lease passed. Otherwise the
+// session waits for tolerance past its lease, while its worker may be riding out an outage (ADR-029).
+func (s *Store) ExpireSessions(ctx context.Context, limit int, tolerance time.Duration) (int, error) {
 	rows, err := s.pool.Query(ctx, `
 		UPDATE worker_sessions SET state = 'EXPIRED', closed_at = now()
-		WHERE id IN (SELECT id FROM worker_sessions WHERE state = 'ACTIVE' AND lease_expires_at < now()
-		    ORDER BY lease_expires_at LIMIT $1 FOR UPDATE SKIP LOCKED)
-		RETURNING pool`, limit)
+		WHERE id IN (SELECT ws.id FROM worker_sessions ws LEFT JOIN engine_nodes n ON n.node_id = ws.renewed_by
+		    WHERE ws.state = 'ACTIVE' AND ws.lease_expires_at < now()
+		      AND (ws.renewed_by IS NULL OR n.stopped_at IS NOT NULL OR n.beat_at > ws.lease_expires_at
+		           OR ws.lease_expires_at < now() - make_interval(secs => $2))
+		    ORDER BY ws.lease_expires_at LIMIT $1 FOR UPDATE OF ws SKIP LOCKED)
+		RETURNING pool`, limit, tolerance.Seconds())
 	if err != nil {
 		return 0, err
 	}

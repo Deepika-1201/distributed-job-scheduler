@@ -6,22 +6,25 @@ import (
 	"log/slog"
 	"time"
 
+	"jobscheduler/internal/coordination"
 	"jobscheduler/internal/persistence/postgres"
 )
 
 // Store is what the reaper needs; *postgres.Store implements it.
 type Store interface {
 	Ping(ctx context.Context) error
-	ExpireSessions(ctx context.Context, limit int) (int, error)
+	ExpireSessions(ctx context.Context, limit int, tolerance time.Duration) (int, error)
 	LoseOrphanedAttempts(ctx context.Context, limit int) (int, error)
 	TimeOutOverdueAttempts(ctx context.Context, grace time.Duration, limit int) (int, error)
 }
 
 // ReaperConfig holds the HLD §15 values; zero fields take the defaults.
 type ReaperConfig struct {
-	Interval time.Duration // 5 s
-	WarmUp   time.Duration // one session TTL, 30 s
-	Grace    time.Duration // after the attempt deadline, 30 s
+	Interval        time.Duration // 5 s
+	WarmUp          time.Duration // one session TTL, 30 s
+	Grace           time.Duration // after the attempt deadline, 30 s
+	CallTimeout     time.Duration // per database call, 5 s; a stall restarts the warm-up
+	OutageTolerance time.Duration // 5 min (ADR-029)
 }
 
 const reapBatch = 100
@@ -44,6 +47,12 @@ func NewReaper(store Store, cfg ReaperConfig, log *slog.Logger) *Reaper {
 	}
 	if cfg.Grace == 0 {
 		cfg.Grace = 30 * time.Second
+	}
+	if cfg.CallTimeout == 0 {
+		cfg.CallTimeout = 5 * time.Second
+	}
+	if cfg.OutageTolerance == 0 {
+		cfg.OutageTolerance = coordination.OutageTolerance
 	}
 	return &Reaper{cfg: cfg, store: store, log: log.With("component", "reaper"), now: time.Now}
 }
@@ -74,30 +83,37 @@ func (r *Reaper) Run(ctx context.Context) error {
 }
 
 // step runs one pass and reports whether a batch was full. Until the node has been connected
-// for WarmUp, it expires nothing: live workers first need a chance to renew (HLD S6).
+// for WarmUp, it expires nothing: live workers first need a chance to renew (HLD S6). Every call
+// has a deadline, so a stalled database fails the step and restarts the warm-up instead of
+// hanging until it returns (LLD §21.2).
 func (r *Reaper) step(ctx context.Context) (bool, error) {
-	if err := r.store.Ping(ctx); err != nil {
-		r.healthySince = time.Time{}
-		return false, err
+	var expired, lost, timedOut int
+	err := r.call(ctx, r.store.Ping)
+	if err == nil {
+		now := r.now()
+		if r.healthySince.IsZero() {
+			r.healthySince = now
+		}
+		if now.Sub(r.healthySince) < r.cfg.WarmUp {
+			return false, nil
+		}
+		err = r.call(ctx, func(ctx context.Context) (err error) {
+			expired, err = r.store.ExpireSessions(ctx, reapBatch, r.cfg.OutageTolerance)
+			return err
+		})
 	}
-	now := r.now()
-	if r.healthySince.IsZero() {
-		r.healthySince = now
+	if err == nil {
+		err = r.call(ctx, func(ctx context.Context) (err error) {
+			lost, err = r.store.LoseOrphanedAttempts(ctx, reapBatch)
+			return err
+		})
 	}
-	if now.Sub(r.healthySince) < r.cfg.WarmUp {
-		return false, nil
+	if err == nil {
+		err = r.call(ctx, func(ctx context.Context) (err error) {
+			timedOut, err = r.store.TimeOutOverdueAttempts(ctx, r.cfg.Grace, reapBatch)
+			return err
+		})
 	}
-	expired, err := r.store.ExpireSessions(ctx, reapBatch)
-	if err != nil {
-		r.healthySince = time.Time{}
-		return false, err
-	}
-	lost, err := r.store.LoseOrphanedAttempts(ctx, reapBatch)
-	if err != nil {
-		r.healthySince = time.Time{}
-		return false, err
-	}
-	timedOut, err := r.store.TimeOutOverdueAttempts(ctx, r.cfg.Grace, reapBatch)
 	if err != nil {
 		r.healthySince = time.Time{}
 		return false, err
@@ -106,6 +122,12 @@ func (r *Reaper) step(ctx context.Context) (bool, error) {
 		r.log.Info("reaped", "sessions_expired", expired, "attempts_lost", lost, "attempts_timed_out", timedOut)
 	}
 	return expired == reapBatch || lost == reapBatch || timedOut == reapBatch, nil
+}
+
+func (r *Reaper) call(ctx context.Context, fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, r.cfg.CallTimeout)
+	defer cancel()
+	return fn(ctx)
 }
 
 // MaintenanceStore runs one maintenance pass; *postgres.Store implements it.

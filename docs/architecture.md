@@ -755,8 +755,9 @@ flowchart LR
 | Reaper interval / warm-up | 5 s / ≥ 30 s after (re)connecting to the DB | Warm-up lets live sessions renew before anything expires (S6). |
 | Engine-side timeout grace | 30 s after the attempt deadline | The worker enforces deadlines first; the engine is the backstop. |
 | `Idempotency-Key` retention | 24 h | Covers client retry windows. |
+| Outage tolerance | 5 min | NFR-8's recovery time. Workers ride out a database outage that their engine reports for this long, and their sessions wait for it ([ADR-029](decisions/ADR-029-riding-out-database-outages.md)). |
 
-These are starting points, to be tuned with load and failure tests.
+Phase 10's fault tests settled these values ([LLD §21.4](low-level-design.md#214-timing-values)).
 
 ### 14.3 Retry flow
 
@@ -832,7 +833,7 @@ Each scenario lists detection, recovery, consistency, duplicate execution, corru
 
 #### S4 — A worker is partitioned from the engine but keeps executing
 - **Detection:** the engine sees heartbeats stop and the session expires. The worker's SDK sees its renewals failing.
-- **Recovery:** the job is retried elsewhere with a new token. Worker A self-fences after 25 s without renewal: it cancels its handlers and discards their results. If A reports later anyway, the report is rejected.
+- **Recovery:** the job is retried elsewhere with a new token. Worker A self-fences after 25 s without renewal: it cancels its handlers and discards their results. If A reports later anyway, the report is rejected. The exception is a database outage that A's engine reports to it (S6): then no node can expire A's session either ([ADR-029](decisions/ADR-029-riding-out-database-outages.md)).
 - **Consistency:** platform state reflects only the current attempt. A zombie can't overwrite it because completion is guarded by `attempt_id` and fencing token.
 - **Duplicate execution:** possible for external side effects during the overlap window, which self-fencing bounds. The idempotency key mitigates it; handlers can also pass the fencing token downstream where a system supports it.
 - **Corruption risk:** none to platform state. Downstream duplicates are possible if a handler isn't idempotent, which violates the handler contract.
@@ -853,7 +854,7 @@ Each scenario lists detection, recovery, consistency, duplicate execution, corru
 - **Recovery:**
   - `api` returns `503` with `Retry-After`. Clients retry safely with `Idempotency-Key`.
   - Engine loops back off and retry. Pool leases lapse; on reconnect, owners re-acquire (epoch + 1) and reload state.
-  - Workers keep executing in-flight jobs and buffer `Complete` reports, which dispatchers retry until acknowledged.
+  - Workers keep executing in-flight jobs and buffer `Complete` reports, which dispatchers retry until acknowledged. Engines tell workers the database is unavailable, and workers ride that out for up to the outage tolerance (5 min) instead of self-fencing. A session expires only with evidence that its engine had the database while the worker failed to renew ([ADR-029](decisions/ADR-029-riding-out-database-outages.md)).
   - **Reaper warm-up:** during the outage no leases could be renewed, so every session looks expired when the database returns. The reaper expires nothing until its node has had database connectivity for at least one session TTL. That gives live workers time to renew, and avoids a wave of false expiries and duplicate retries.
 - **Consistency:** synchronous replication means no acknowledged write is lost (RPO ≈ 0). Transactions in flight at the moment of failure abort, and callers retry idempotently.
 - **Duplicate execution:** limited to jobs whose worker died before its completion could be recorded.
@@ -1371,7 +1372,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-011](decisions/ADR-011-caching-and-redis.md) | Caching and Redis | Accepted |
 | [ADR-012](decisions/ADR-012-language-and-core-libraries.md) | Language and core libraries | Accepted; amended by ADR-013 and ADR-014 |
 | [ADR-013](decisions/ADR-013-cron-evaluation.md) | Cron evaluation with explicit DST rules | Accepted |
-| [ADR-014](decisions/ADR-014-worker-protocol.md) | Worker protocol: unary calls, long-poll and owner redirects | Accepted; amended by ADR-023 and ADR-025 |
+| [ADR-014](decisions/ADR-014-worker-protocol.md) | Worker protocol: unary calls, long-poll and owner redirects | Accepted; amended by ADR-023, ADR-025 and ADR-029 |
 | [ADR-015](decisions/ADR-015-releasing-undelivered-assignments.md) | Releasing assignments that were never delivered | Accepted |
 | [ADR-016](decisions/ADR-016-withdrawing-provisional-schedule-jobs.md) | Schedule changes withdraw provisional jobs by deleting them | Accepted |
 | [ADR-017](decisions/ADR-017-platform-administration.md) | Platform administration: platform-admin role, dispatch holds and worker drain | Accepted |
@@ -1386,6 +1387,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-026](decisions/ADR-026-tls-in-process.md) | TLS terminated in the process, with certificate reload | Accepted |
 | [ADR-027](decisions/ADR-027-least-privilege-database-roles.md) | Least-privilege database roles | Accepted |
 | [ADR-028](decisions/ADR-028-row-level-security.md) | Row-level security is not adopted in V1 | Accepted |
+| [ADR-029](decisions/ADR-029-riding-out-database-outages.md) | Workers ride out database outages; session expiry needs evidence | Accepted |
 
 ## Appendix C — Open questions for the LLD
 
@@ -1403,7 +1405,7 @@ Resolved questions link to their answer.
 10. Semantics of the "buffer one" and "cancel previous" overlap policies. → [LLD §10.4](low-level-design.md#104-promoter-and-overlap-policies)
 11. When a schedule is paused, edited or deleted: delete or mark its withdrawn materialized jobs? → [ADR-016](decisions/ADR-016-withdrawing-provisional-schedule-jobs.md)
 12. API error model, full contracts and the OpenAPI specification. → [LLD §9](low-level-design.md#9-job-api), [OpenAPI](../api/openapi.yaml)
-13. Final lease, heartbeat and timeout values, validated by failure tests. *Open until phase 10.*
+13. Final lease, heartbeat and timeout values, validated by failure tests. → [LLD §21.4](low-level-design.md#214-timing-values)
 14. How per-node rate limits adjust as `api` replicas autoscale. → [LLD §9.6](low-level-design.md#96-admission-control-phase-4-part)
 
 ## Appendix D — Glossary

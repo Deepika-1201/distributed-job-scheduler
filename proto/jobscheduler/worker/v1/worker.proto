@@ -10,6 +10,9 @@ import "google/protobuf/timestamp.proto";
 option go_package = "jobscheduler/pkg/workerpb;workerpb";
 
 // WorkerService requires "authorization: Bearer <worker token>" metadata on every call.
+//
+// An engine that can't reach the database answers UNAVAILABLE with a google.rpc.ErrorInfo of
+// domain "jobscheduler", reason "DATABASE_UNAVAILABLE" and metadata "node_id" (ADR-029).
 service WorkerService {
   // Register opens a session with a pool. Any engine node serves it.
   rpc Register(RegisterRequest) returns (RegisterResponse);
@@ -39,6 +42,11 @@ message RegisterResponse {
   string session_id = 1;
   google.protobuf.Duration lease_ttl = 2;
   google.protobuf.Duration heartbeat_interval = 3;
+  // The engine node that opened, and so last renewed, the session.
+  string node_id = 4;
+  // How long the worker may keep running jobs while the node that last renewed its session
+  // reports the database unavailable (ADR-029). Zero means the lease TTL applies.
+  google.protobuf.Duration outage_tolerance = 5;
 }
 
 message PollRequest {
@@ -100,6 +108,8 @@ message HeartbeatResponse {
   repeated string stale = 2;
   // An operator asked this worker to drain: stop polling, finish running jobs, deregister.
   bool drain = 3;
+  // The engine node that renewed the session.
+  string node_id = 4;
 }
 
 enum Outcome {

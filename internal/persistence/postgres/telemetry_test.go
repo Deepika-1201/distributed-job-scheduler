@@ -70,7 +70,7 @@ func TestTransitionMetrics(t *testing.T) {
 		t.Fatalf("PromoteDue = %d, %v", n, err)
 	}
 	f.exec(`UPDATE worker_sessions SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, string(ws.ID))
-	if n, err := f.store.ExpireSessions(ctx, 100); err != nil || n != 1 {
+	if n, err := f.store.ExpireSessions(ctx, 100, 5*time.Minute); err != nil || n != 1 {
 		t.Fatalf("ExpireSessions = %d, %v", n, err)
 	}
 	f.createSchedule()

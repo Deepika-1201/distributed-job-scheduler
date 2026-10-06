@@ -59,6 +59,7 @@ func (s *Store) RunMaintenance(ctx context.Context, r Retention) (MaintenanceRep
 		{"idempotency_keys", "expires_at < now()", nil},
 		{"schedule_fires", "fire_time < $1", []any{cutoff}},
 		{"worker_sessions", "state <> 'ACTIVE' AND closed_at < $1", []any{now.Add(-r.Sessions)}},
+		{"engine_nodes", "beat_at < $1", []any{now.Add(-r.Sessions)}},
 	} {
 		n, err := s.purge(ctx, p.table, p.where, p.args...)
 		rep.RowsDeleted[p.table] = n

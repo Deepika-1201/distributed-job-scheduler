@@ -25,6 +25,7 @@ import (
 	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -100,7 +101,6 @@ const (
 	completeTimeout = 10 * time.Minute
 	callTimeout     = 10 * time.Second
 	reportGrace     = 10 * time.Second
-	fenceMargin     = 5 * time.Second
 	minBackoff      = 500 * time.Millisecond
 	maxBackoff      = 10 * time.Second
 )
@@ -183,6 +183,9 @@ type worker struct {
 	ttl        time.Duration
 	interval   time.Duration
 	lastBeat   time.Time
+	renewedBy  string        // the engine node that last renewed the session
+	tolerance  time.Duration // how long renewedBy's database outages may be ridden out
+	explained  time.Time     // when renewedBy last reported the database unavailable, since lastBeat
 	running    map[string]*attempt
 	reporting  map[string]*attempt // finished, outcome not yet acknowledged
 	handlers   sync.WaitGroup
@@ -225,6 +228,7 @@ func (w *worker) register(ctx context.Context) error {
 		if err == nil {
 			w.mu.Lock()
 			w.session, w.ttl, w.interval = resp.SessionId, resp.LeaseTtl.AsDuration(), resp.HeartbeatInterval.AsDuration()
+			w.renewedBy, w.tolerance, w.explained = resp.NodeId, resp.OutageTolerance.AsDuration(), time.Time{}
 			w.lastBeat = time.Now()
 			w.generation++
 			w.mu.Unlock()
@@ -438,12 +442,14 @@ func (w *worker) start(a *workerpb.Assignment, generation int) {
 	ctx, cancelTimeout := context.WithDeadline(ctx, job.Deadline)
 	att := &attempt{job: job, cancel: cancel, span: span}
 	w.mu.Lock()
-	if w.generation != generation || w.renewing != nil {
+	_, running := w.running[job.AttemptID]
+	_, reporting := w.reporting[job.AttemptID]
+	if w.generation != generation || w.renewing != nil || running || reporting {
 		w.mu.Unlock()
 		cancelTimeout()
 		cancel(errStale)
 		span.End()
-		return // assigned to a session this worker has abandoned; the engine retries it
+		return // assigned to a session this worker has abandoned, which the engine retries, or a duplicate (S9)
 	}
 	w.running[job.AttemptID] = att
 	w.mu.Unlock()
@@ -572,18 +578,21 @@ func (w *worker) complete(req *workerpb.CompleteRequest, att *attempt) {
 	w.log.Error("gave up reporting an outcome; the engine will retry the job", "job_id", att.job.ID)
 }
 
-// heartbeats renews the session, delivers cancels and self-fences when the engine is
-// unreachable for longer than the session lease allows.
+// heartbeats renews the session, delivers cancels and self-fences before any node may expire
+// the session: TTL − margin after the last renewal, or longer while the node that renewed it
+// keeps reporting the database unavailable (ADR-029).
 func (w *worker) heartbeats(ctx context.Context) {
 	for {
 		w.mu.Lock()
 		interval := w.interval
+		wait := min(interval, max(0, time.Until(w.fenceAt())))
 		w.mu.Unlock()
-		if !sleep(ctx, interval) {
+		if !sleep(ctx, wait) {
 			return
 		}
 		session, generation := w.sessionInfo()
 		w.mu.Lock()
+		untilFence := time.Until(w.fenceAt())
 		running := make([]*workerpb.RunningAttempt, 0, len(w.running)+len(w.reporting))
 		for _, set := range []map[string]*attempt{w.running, w.reporting} {
 			for _, a := range set {
@@ -591,8 +600,12 @@ func (w *worker) heartbeats(ctx context.Context) {
 			}
 		}
 		w.mu.Unlock()
+		if untilFence <= 0 {
+			w.renewSession(ctx, generation) // self-fence: a node may expire the session and retry our jobs
+			continue
+		}
 		var resp *workerpb.HeartbeatResponse
-		err := w.call(ctx, interval, func(ctx context.Context, c workerpb.WorkerServiceClient) (err error) {
+		err := w.call(ctx, min(interval, untilFence), func(ctx context.Context, c workerpb.WorkerServiceClient) (err error) {
 			resp, err = c.Heartbeat(ctx, &workerpb.HeartbeatRequest{SessionId: session, Running: running})
 			return err
 		})
@@ -603,18 +616,23 @@ func (w *worker) heartbeats(ctx context.Context) {
 			w.renewSession(ctx, generation)
 		case err != nil:
 			w.mu.Lock()
-			silent, ttl := time.Since(w.lastBeat), w.ttl
+			w.noteFailure(err)
+			silent, due := time.Since(w.lastBeat), !time.Now().Before(w.fenceAt())
+			riding := !w.explained.IsZero()
 			w.mu.Unlock()
-			w.log.Warn("heartbeat failed", "error", err, "since_last_success", silent.Round(time.Second))
-			if silent > ttl-fenceMargin {
-				w.renewSession(ctx, generation) // self-fence: the engine may already have retried our jobs
+			w.log.Warn("heartbeat failed", "error", err, "since_last_success", silent.Round(time.Second), "riding_out_outage", riding)
+			if due {
+				w.renewSession(ctx, generation) // self-fence: a node may expire the session and retry our jobs
 			}
 		default:
 			if resp.Drain {
 				w.requestDrain()
 			}
 			w.mu.Lock()
-			w.lastBeat = time.Now()
+			w.lastBeat, w.explained = time.Now(), time.Time{}
+			if resp.NodeId != "" {
+				w.renewedBy = resp.NodeId
+			}
 			for _, id := range resp.Cancel {
 				if a, ok := w.running[id]; ok {
 					a.cancel(errCancelRequested)
@@ -630,6 +648,51 @@ func (w *worker) heartbeats(ctx context.Context) {
 			w.mu.Unlock()
 		}
 	}
+}
+
+// fenceAt is when the worker must stop acting on its session. Explained failures extend it up
+// to the outage tolerance, but only while each arrives within TTL − margin of the previous one:
+// the explaining node records no liveness for a TTL after explaining, so no node can expire the
+// session in that time (ADR-029). The caller holds w.mu.
+func (w *worker) fenceAt() time.Time {
+	margin := fenceMargin(w.ttl)
+	if w.explained.IsZero() || w.tolerance <= w.ttl {
+		return w.lastBeat.Add(w.ttl - margin)
+	}
+	return minTime(w.lastBeat.Add(w.tolerance-margin), w.explained.Add(w.ttl-margin))
+}
+
+// noteFailure records a heartbeat failure explained by the node that renewed the session, if
+// it arrived before the fence. The caller holds w.mu.
+func (w *worker) noteFailure(err error) {
+	if node, ok := explainedBy(err); ok && node != "" && node == w.renewedBy && time.Now().Before(w.fenceAt()) {
+		w.explained = time.Now()
+	}
+}
+
+// explainedBy returns the engine node that reported err as a database outage (ADR-029).
+func explainedBy(err error) (string, bool) {
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.Unavailable {
+		return "", false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok && info.Domain == workerpb.ErrorDomain &&
+			info.Reason == workerpb.ReasonDatabaseUnavailable {
+			return info.Metadata[workerpb.MetadataNodeID], true
+		}
+	}
+	return "", false
+}
+
+// fenceMargin is how long before its lease ends the worker stops: 5 s, or a sixth of a short TTL.
+func fenceMargin(ttl time.Duration) time.Duration { return min(5*time.Second, ttl/6) }
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }
 
 // drain waits for running handlers, cancelling those still running after DrainTimeout. It

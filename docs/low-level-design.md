@@ -24,6 +24,7 @@ Implements the [HLD](architecture.md). This document grows phase by phase, and e
 | [18. Pool backlog](#18-pool-backlog) | 11 | Written |
 | [19. Load-test gate](#19-load-test-gate) | 5 | Written |
 | [20. Security hardening](#20-security-hardening) | 12 | Written |
+| [21. Failure testing](#21-failure-testing) | 10 | Written |
 | Events and outbox | Later | Planned |
 
 The [HLD's open questions](architecture.md#appendix-c--open-questions-for-the-lld) are resolved in the phase that needs them: 1–5 in phase 3 (§8.1), 6 and 12 in phase 4, 7–9 in phase 8, 10 and 11 in phase 6, 13 in phase 10, 14 in phase 4.
@@ -400,6 +401,8 @@ The body is always `{"error": {"code", "message", "request_id", "details"}}`. In
 | 422 | `idempotency_key_reused` | The same key was sent with a different body |
 | 429 | `rate_limited` | The tenant's rate limit was hit; `Retry-After` is set |
 | 500 | `internal` | An unexpected error, logged with the request ID |
+| 503 | `overloaded` | The pool's backlog is past its target and the priority is shed (§18); `Retry-After` is set |
+| 503 | `unavailable` | The database can't be reached, or didn't answer within the 10 s request deadline (§21.2); `Retry-After: 5` |
 
 ### 9.3 Authentication and authorization
 
@@ -622,6 +625,10 @@ Implements HLD §12 and [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.m
 - **Calls:** all unary, and `Poll` is a long-poll. Unary calls pass through any HTTP/2 load balancer and are simple to retry.
 - **Versioning:** fields are only ever added. A breaking change means a `v2` package served side by side.
 - **Authentication:** `authorization: Bearer <token>`, either a per-pool worker token scoped to its pool or the optional cluster token `JS_WORKER_TOKEN` ([ADR-025](decisions/ADR-025-per-pool-worker-tokens.md), §20.1).
+- **Database outages** ([ADR-029](decisions/ADR-029-riding-out-database-outages.md)):
+  - An engine that can't reach the database answers `UNAVAILABLE` with `google.rpc.ErrorInfo`: domain `jobscheduler`, reason `DATABASE_UNAVAILABLE`, metadata `node_id`.
+  - It gives up on the database 1 s before the worker's deadline, or at three quarters of the time left if that is sooner, so a stalled database is reported rather than timed out.
+  - `RegisterResponse` and `HeartbeatResponse` carry the engine's `node_id`, and `RegisterResponse` the `outage_tolerance` (5 min).
 
 | RPC | Served by | Behavior |
 |---|---|---|
@@ -640,7 +647,8 @@ Implements HLD §12 and [ADR-002](decisions/ADR-002-worker-pull-via-dispatcher.m
 
 ### 12.2 Sessions (phase 8 migration)
 
-- **`worker_sessions`:** `id`, `pool`, `worker_id`, `job_types text[]`, `slots`, `labels`, `runtime_version`, `state` (`ACTIVE`, `CLOSED`, `EXPIRED`), `created_at`, `heartbeat_at`, `lease_expires_at`, `closed_at`.
+- **`worker_sessions`:** `id`, `pool`, `worker_id`, `job_types text[]`, `slots`, `labels`, `runtime_version`, `state` (`ACTIVE`, `CLOSED`, `EXPIRED`), `created_at`, `heartbeat_at`, `lease_expires_at`, `closed_at`, and `renewed_by`, the engine node that last renewed the lease (migration 00013).
+- **`engine_nodes`:** `node_id`, `beat_at`, `stopped_at`. Each engine records its liveness every heartbeat interval: the evidence session expiry needs (§13.1, ADR-029).
 - **`tenants.max_running`:** optional per-tenant cap on running jobs in each pool; `NULL` means unlimited. Managed through the quotas API (§15).
 - **Index:** `jobs (tenant_id) WHERE state = 'RUNNING'` serves cap counting.
 - **Heartbeats** update the session row directly: one write per worker every 5 s, 200 writes/s for 1,000 workers. Batching renewals per engine (HLD §12.2) is a phase 14 optimization.
@@ -686,7 +694,9 @@ Every engine node runs the gRPC server, plus a pool lease manager (§11.3).
 
 - **Deadlines:** the attempt timeout is enforced locally on the monotonic clock, starting when the assignment is received.
 - **Completions** retry with backoff until accepted, rejected as stale, or 10 minutes pass.
-- **Self-fencing:** if no heartbeat succeeds for `lease TTL − 5 s` (25 s), the worker cancels every handler, drops their results and re-registers.
+- **Self-fencing:** if no heartbeat succeeds for `lease TTL − margin` (25 s; the margin is 5 s, or a sixth of a shorter TTL), the worker cancels every handler, drops their results and re-registers. The fence is checked on its own deadline, not only after a slow call returns.
+- **Riding out a database outage** ([ADR-029](decisions/ADR-029-riding-out-database-outages.md)): failures that the engine which last renewed the session explains as `DATABASE_UNAVAILABLE` extend the fence, up to the outage tolerance minus the margin. Each explanation must arrive within `TTL − margin` of the previous one. Handlers keep running, and their reports are retried until the database returns.
+- **Duplicate assignments:** an assignment for an attempt the worker is already running or reporting is dropped (HLD S9).
 - **No work on an abandoned session:** after self-fencing, or when the engine reports the session gone, the worker doesn't poll until it has registered again. It drops assignments that arrive for the old session; the engine recovers them as lost attempts.
 - **One renewal at a time:** when the poll loop and the heartbeat loop both find the session gone, one re-registers. The other waits for it only until its own context ends, so shutdown never waits on re-registration against an engine that is down.
 - **Drain** (context cancelled):
@@ -713,8 +723,12 @@ Implements the reaper, timeout and retention rows of HLD §14 and NFR-9.
 
 Every engine node runs one, every 5 s. Each step handles a batch of 100 and repeats at once while its batch is full.
 
-1. **Warm-up:** do nothing until this node has had database connectivity for one session TTL (30 s). A failed ping or step restarts the warm-up (HLD S6).
-2. **Expire sessions:** `ACTIVE` sessions whose `lease_expires_at` has passed → `EXPIRED`. Rows are locked with `SKIP LOCKED`, so reapers on different nodes share the work.
+1. **Warm-up:** do nothing until this node has had database connectivity for one session TTL (30 s). A failed ping or step restarts the warm-up (HLD S6). Every call has a 5 s deadline, so a stalled database fails the step too (§21.2).
+2. **Expire sessions:** `ACTIVE` sessions whose `lease_expires_at` has passed → `EXPIRED`, when there is evidence that the worker, not its engine, failed to renew ([ADR-029](decisions/ADR-029-riding-out-database-outages.md)):
+   - the engine in `renewed_by` has stopped, or recorded its liveness after the lease passed, or the session has none;
+   - otherwise the session waits until the lease passed more than the outage tolerance (5 min) ago.
+
+   Rows are locked with `SKIP LOCKED`, so reapers on different nodes share the work.
 3. **Lose orphaned attempts:** `RUNNING` jobs whose session is no longer `ACTIVE` → attempt `LOST`.
 4. **Time out overdue attempts:** `RUNNING` jobs with `attempt_deadline < now() − 30 s` → attempt `TIMED_OUT`. This is the backstop behind the worker's own deadline.
 
@@ -1219,3 +1233,85 @@ Not adopted in V1 ([ADR-028](decisions/ADR-028-row-level-security.md)). Tenant s
 - **TLS:** HTTPS and gRPC with a generated certificate, and reload after the files change.
 - **Roles:** a login role holding only `jobscheduler_runtime` runs submissions, claims, completions and maintenance, but cannot create tables or change `audit_log`.
 - **Isolation and headers:** §20.6.
+
+## 21. Failure testing
+
+Phase 10: every scenario of [HLD §14.5](architecture.md#145-failure-scenarios) automated or documented, and the timing values HLD open question 13 left open.
+
+### 21.1 Fault injection
+
+- **Database faults:** `pgtest.Proxy`, a TCP proxy in front of PostgreSQL that a test can switch between three modes:
+  - **pass**, forwarding traffic;
+  - **cut**, resetting open connections and refusing new ones, like a stopped server;
+  - **stall**, holding connections open while forwarding nothing, like a blackholed network.
+
+  Each engine in a test can get its own proxy, so one node can be partitioned from the database (S12), or every node (S6).
+- **Engine crash:** cut the node's database, then stop it. Its leases are neither renewed nor released, as after a crash.
+- **Worker crash:** a raw protocol client that registers, takes a job and stops heartbeating.
+- **Worker partition:** fake engines in the SDK tests that stop answering.
+- **Scale:** tests shrink the timings (session TTL 2 s, pool lease TTL 2 s, heartbeats every 200 ms) and keep their ratios.
+
+### 21.2 Findings
+
+The fault tests found four gaps between the HLD and the code.
+
+1. **A database outage cancelled every running job.** The SDK self-fenced after `TTL − 5 s` of failed heartbeats, whatever the cause. A managed failover takes one to a few minutes, so every handler was cancelled and its job retried, which contradicts S6. Fixed by [ADR-029](decisions/ADR-029-riding-out-database-outages.md):
+   - engines explain database failures to workers;
+   - workers ride out explained failures up to the outage tolerance (5 min);
+   - a session expires only once the engine that last renewed it has recorded its liveness after the lease passed, or after the outage tolerance. Engines record liveness every 5 s while they have the database, and pause for one session TTL after explaining a failure.
+2. **The API answered `500` during a database outage.** S6 says `503` with `Retry-After`. Connection failures now map to `503 unavailable` with `Retry-After: 5`. Requests also get a 10 s deadline, so a stalled database answers `503` rather than holding requests until the server's write timeout.
+3. **The reaper had no deadline on its calls.** A stalled database made its ping hang rather than fail, so the warm-up never restarted. A query sent before the stall could also expire sessions the moment the database came back. Each reaper call now has a 5 s deadline, and a failed or timed-out step restarts the warm-up.
+4. **The SDK ran a duplicate assignment twice.** S9 says a worker ignores an assignment for an attempt it is already running. `start` now drops it.
+
+### 21.3 Scenario coverage
+
+| Scenario | Checked by | |
+|---|---|---|
+| S1 Engine crashes | `TestEngineCrashHandsPoolsOver`: the owner crashes; another node takes the pool with epoch + 1 within the lease TTL plus one acquire round, and new jobs complete through it. The scheduling loops are leaderless: materializer and promoter tests run several at once. | Automated |
+| S2 Several schedulers | `TestConcurrentMaterializersNeverFireTwice`, `TestConcurrentClaimersNeverShareAJob`, `TestClaimIsFencedByThePoolLease`, `TestConcurrentAcquireHasOneWinner` | Automated |
+| S3 Worker crashes | `TestCrashedWorkersJobIsRetriedElsewhere`, `TestExpiredSessionsLoseTheirAttempts`, `TestExhaustedRetriesDeadLetter` | Automated |
+| S4 Worker partitioned | `TestStaleAttemptIsFenced`, `TestUnreachableEngineSelfFences`, `TestAbandonedSessionTakesNoWork`, `TestExpiryNeedsEvidence` | Automated |
+| S5 Broker down | No broker in V1 | Not applicable |
+| S6 Database down | `TestWorkersRideOutADatabaseOutage` (cut and stall): handlers keep running, the report lands after recovery, one attempt. `TestDatabaseOutageAnswers503`, `TestReaperWarmsUpAfterConnectivityReturns`, `TestReaperStallRestartsWarmUp`, `TestWorkerRidesOutExplainedFailures` | Automated |
+| S7 Job runs too long | `TestJobOutcomesEndToEnd` (worker timeout), `TestOverdueAttemptsTimeOutAfterGrace` (engine backstop) | Automated |
+| S8 Submitted twice | `TestSubmitIdempotency`, `TestConcurrentSubmissionsWithSameKeyCreateOneJob`, `TestDedupeKeyIsUniqueAmongActiveJobs`, `TestIdempotencyAndDedupe` | Automated |
+| S9 Delivered twice | `TestDuplicateCompletionIsReplayed`, `TestHeartbeatReconcilesAttempts`, `TestDuplicateAssignmentRunsOnce` | Automated |
+| S10 Retry processor crashes | No such process: the retry decision commits with the failure (`TestRetryableFailureSchedulesRetry`); a rolled-back completion leaves the attempt `RUNNING` for the worker's retried report or the reaper | Automated |
+| S11 Leader crashes | `TestEngineCrashHandsPoolsOver` (sessions stay `ACTIVE` across the takeover), `TestManagerSelfFencesBeforeTakeover`, `TestPoolOwnershipHandsOverWhenTheOwnerStops` | Automated |
+| S12 Network partition | `TestEnginePartitionedFromTheDatabase`: the cut-off owner stops dispatching before another node takes over, new jobs flow through the new owner, and the cut-off node's worker finishes its job without a second attempt. Worker and client partitions: S4, S8. | Automated |
+| S13 Clock drift | Correctness uses the database clock; `TestClockOffset` checks the offset metric. Large jumps on the database host are an alerting concern. | Automated (metric); drift itself manual |
+| S14 100× load | `TestPerTenantRateLimit`, `TestQuotasAreEnforced`, `TestOverloadedPoolShedsLowThenNormal`; throughput is phase 14 | Automated; capacity in phase 14 |
+
+### 21.4 Timing values
+
+These resolve HLD open question 13. Tests run them scaled down, and the relationships between them are what the tests check.
+
+| Value | Setting | Why |
+|---|---|---|
+| Worker heartbeat | every 5 s | Delivers cancels quickly; six renewals per session TTL |
+| Session TTL | 30 s | Longer than a pool failover (≤ ~13 s) plus a heartbeat, so sessions survive an engine failure (S11) |
+| Worker self-fence | TTL − 5 s (25 s) | The worker stops before any node may expire its session (S4) |
+| Outage tolerance | 5 min | NFR-8's RTO. Covers a managed database failover. Workers ride out explained failures until tolerance − 5 s; sessions whose engine lacks the database expire after it (ADR-029). |
+| Engine liveness | every 5 s, paused for one session TTL after an explained failure | Evidence for session expiry arrives within one interval, and never while a worker may be riding out an outage |
+| Pool lease TTL / renewal / margin | 10 s / every 3.3 s / 2 s | The owner stops at 8 s, before takeover at 10 s. Dispatch pauses for at most the TTL plus one acquire round, about 13 s (S1, S11). |
+| Singleton lease TTL | 30 s | Maintenance tolerates a slower failover |
+| Reaper interval / warm-up / call deadline | 5 s / 30 s / 5 s | The warm-up equals the session TTL, so every live worker gets five chances to renew after an outage (S6) |
+| Engine timeout grace | 30 s | The worker enforces deadlines first; the engine is the backstop (S7) |
+| API request deadline | 10 s | Fifty times NFR-5's p99; a stalled database answers `503` |
+| Worker call headroom | 1 s, or a quarter of the time left | The engine answers before the worker's deadline, so a slow database is explained rather than timed out |
+
+### 21.5 Tests
+
+- **Fault proxy:** `TestProxyFaults`: pass, cut and stall, and restore.
+- **Store:**
+  - `TestIsUnavailable` classifies connection errors and failover SQLSTATEs, but not constraint, lock or context errors;
+  - `TestExpiryNeedsEvidence`: a session expires once its engine records liveness after the lease passed, or has stopped, and otherwise after the outage tolerance. Sessions without an engine expire as before;
+  - `TestBeatNodeRejectsLateWrites`: a liveness write that runs late, or after a stop, has no effect.
+- **Reaper:** `TestReaperStallRestartsWarmUp`.
+- **SDK, against fake engines:**
+  - `TestWorkerRidesOutExplainedFailures` and `TestRidingOutStopsAtTheTolerance`;
+  - `TestUnreachableEngineSelfFences`: unexplained failures, deadlines, and explanations from another node still self-fence at `TTL − margin`;
+  - `TestDuplicateAssignmentRunsOnce`.
+- **API:** `TestDatabaseOutageAnswers503`, for a cut and a stalled database.
+- **End to end:** the S1, S6 (cut and stall, which also checks the engine's explanations and headroom) and S12 tests of §21.3.
+- **The tests catch the bugs:** with the outage tolerance set to nothing, the S6 test's handlers are cancelled and the S12 test's job runs twice.

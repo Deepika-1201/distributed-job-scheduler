@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"jobscheduler/internal/domain"
+	"jobscheduler/internal/persistence/postgres"
 )
 
 // apiError is an error with its HTTP representation (LLD §9.2).
@@ -29,6 +30,9 @@ func newError(status int, code, format string, args ...any) *apiError {
 var (
 	errUnauthenticated = newError(http.StatusUnauthorized, "unauthenticated", "a valid API key is required")
 	errInternal        = newError(http.StatusInternalServerError, "internal", "internal error")
+	// errUnavailable answers while the database can't be reached; requests may be retried (HLD S6).
+	errUnavailable = &apiError{status: http.StatusServiceUnavailable, code: "unavailable",
+		message: "the service is temporarily unavailable; retry later", retryAfter: 5 * time.Second}
 )
 
 func errPermission(format string, args ...any) *apiError {
@@ -53,6 +57,8 @@ func toAPIError(err error) *apiError {
 		return newError(http.StatusConflict, "idempotency_in_progress", "a request with this idempotency key is still in progress")
 	case errors.Is(err, domain.ErrQuotaExceeded):
 		return newError(http.StatusTooManyRequests, "quota_exceeded", "the tenant's quota does not allow this request")
+	case postgres.IsUnavailable(err):
+		return errUnavailable
 	}
 	return errInternal
 }

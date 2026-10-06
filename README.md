@@ -2,7 +2,7 @@
 
 A distributed job scheduling and execution platform: durable jobs that run now, later or on a recurring schedule, with at-least-once execution, retries, priorities and fair sharing across tenants, on a horizontally scalable worker fleet.
 
-**Status:** phases 1–4, 6–9, 11 and 12 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies), coordination (epoch-fenced leases with self-fencing) and the worker system (gRPC [protocol](proto/jobscheduler/worker/v1/worker.proto), dispatcher with weighted priorities and tenant caps, [Go SDK](pkg/workersdk), demo worker), recovery (reaper with warm-up, engine-side timeouts, retention and partition maintenance, bulk cancel and re-drive), observability (Prometheus metrics, OpenTelemetry traces linked from submission to execution, alert rules), and security hardening (per-pool worker tokens, API key rotation, TLS, a least-privilege database role, a route-wide tenant-isolation test, vulnerability and image scanning). Every V1 functional requirement is implemented. That includes platform administration (worker drain, pool and job-type pause), tenant quotas with priority-aware load shedding, and payload JSON Schemas.
+**Status:** phases 1–4 and 6–12 of the [implementation plan](docs/implementation-plan.md) are done: scaffolding, domain core, persistence, the REST API ([OpenAPI](api/openapi.yaml)), the scheduler (cron with time zones and DST, fixed-rate, fixed-delay, misfire and overlap policies), coordination (epoch-fenced leases with self-fencing) and the worker system (gRPC [protocol](proto/jobscheduler/worker/v1/worker.proto), dispatcher with weighted priorities and tenant caps, [Go SDK](pkg/workersdk), demo worker), recovery (reaper with warm-up, engine-side timeouts, retention and partition maintenance, bulk cancel and re-drive), observability (Prometheus metrics, OpenTelemetry traces linked from submission to execution, alert rules), security hardening (per-pool worker tokens, API key rotation, TLS, a least-privilege database role, a route-wide tenant-isolation test, vulnerability and image scanning), and failure testing (a fault-injection suite covering HLD scenarios S1–S14; workers ride out database failovers without losing running jobs). Every V1 functional requirement is implemented. That includes platform administration (worker drain, pool and job-type pause), tenant quotas with priority-aware load shedding, and payload JSON Schemas.
 
 ## Documentation
 
@@ -10,7 +10,7 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 |---|---|
 | [High-level design](docs/architecture.md) | Requirements, architecture, failure scenarios, deployment |
 | [Low-level design](docs/low-level-design.md) | Code structure, state machines, algorithms (grows each phase) |
-| [Decision records](docs/decisions/) | ADR-001 to ADR-028, one decision per file |
+| [Decision records](docs/decisions/) | ADR-001 to ADR-029, one decision per file |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
 
 ## Quick start

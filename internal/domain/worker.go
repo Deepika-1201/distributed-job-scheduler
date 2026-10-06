@@ -20,7 +20,8 @@ type WorkerSession struct {
 	Labels         map[string]string
 	RuntimeVersion string
 	State          SessionState
-	Draining       bool // gets no new assignments; the worker is told to drain
+	Draining       bool   // gets no new assignments; the worker is told to drain
+	RenewedBy      string // the engine node that last renewed the lease (ADR-029)
 	CreatedAt      time.Time
 	HeartbeatAt    time.Time
 	LeaseExpiresAt time.Time

@@ -3,8 +3,11 @@
 package postgres
 
 import (
+	"context"
 	"errors"
+	"io"
 	"math/rand/v2"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +39,29 @@ func NewStore(pool *pgxpool.Pool) *Store {
 func isLockTimeout(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
+}
+
+// IsUnavailable reports whether err means the database can't be reached or can't take writes
+// right now, as opposed to a problem with the request (LLD §21.2). Context errors are not
+// included: callers know whether their own deadline expired.
+func IsUnavailable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "57P01", "57P02", "57P03", // shut down, crashed, starting up
+			"25006", // read-only: a demoted primary during failover
+			"53300": // too many connections
+			return true
+		}
+		return strings.HasPrefix(pgErr.Code, "08") // connection exceptions
+	}
+	var connectErr *pgconn.ConnectError
+	var netErr net.Error
+	return errors.As(err, &connectErr) || errors.As(err, &netErr) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.EOF) || pgconn.SafeToRetry(err)
 }
 
 // canonicalUUID normalizes an externally supplied ID; ok is false if it isn't a UUID.
