@@ -115,18 +115,16 @@ func (s *Store) dropPartitionsBefore(ctx context.Context, cutoff time.Time) (int
 		if err != nil || day.AddDate(0, 0, 1).After(cutoff) {
 			continue
 		}
-		// A short lock timeout: dropping locks the parent, and history inserts must not queue behind it.
-		err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '1s'`); err != nil {
-				return err
-			}
-			_, err := tx.Exec(ctx, `DROP TABLE `+pgx.Identifier{name}.Sanitize())
-			return err
-		})
+		// jobscheduler_drop_partition waits at most 1 s for the parent's lock, so history inserts
+		// don't queue behind it (ADR-027).
+		var done bool
+		err = s.pool.QueryRow(ctx, `SELECT jobscheduler_drop_partition($1, $2)`, m[1], day).Scan(&done)
 		var pgErr *pgconn.PgError
 		switch {
 		case err == nil:
-			dropped++
+			if done {
+				dropped++
+			}
 		case errors.As(err, &pgErr) && pgErr.Code == "55P03":
 			errs = append(errs, fmt.Errorf("drop %s: lock not available; retried next run", name))
 		default:

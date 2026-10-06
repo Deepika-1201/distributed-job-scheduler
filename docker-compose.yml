@@ -4,7 +4,8 @@ x-app: &app
   build: .
   image: jobscheduler:dev
   environment: &app-env
-    JS_DATABASE_URL: postgres://jobs:jobs@postgres:5432/jobs?sslmode=disable
+    # The scheduler connects as a member of jobscheduler_runtime; migrate overrides this with the owner (ADR-027).
+    JS_DATABASE_URL: postgres://jobscheduler_app:app@postgres:5432/jobs?sslmode=disable
     JS_WORKER_TOKEN: local-dev-worker-token # local development only
     JS_LOG_FORMAT: text
 
@@ -24,10 +25,14 @@ services:
       retries: 30
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init-runtime-role.sql:/docker-entrypoint-initdb.d/init-runtime-role.sql:ro
 
   migrate:
     <<: *app
     command: ["migrate"]
+    environment:
+      <<: *app-env
+      JS_DATABASE_URL: postgres://jobs:jobs@postgres:5432/jobs?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy

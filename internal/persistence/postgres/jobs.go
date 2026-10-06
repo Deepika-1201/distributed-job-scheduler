@@ -585,30 +585,23 @@ func (s *Store) EnsurePartitions(ctx context.Context, from time.Time, days int) 
 }
 
 // ensurePartitions returns how many partitions it created. A day that fails, for example
-// because rows for it already sit in the default partition, doesn't stop the others.
+// because rows for it already sit in the default partition, doesn't stop the others. The DDL
+// runs in jobscheduler_create_partition, so the runtime role needs no CREATE rights (ADR-027).
 func (s *Store) ensurePartitions(ctx context.Context, from time.Time, days int) (int, error) {
 	start := from.UTC().Truncate(24 * time.Hour)
 	created := 0
 	var errs []error
 	for i := range days {
-		lo := start.AddDate(0, 0, i)
-		hi := lo.AddDate(0, 0, 1)
+		day := start.AddDate(0, 0, i)
 		for _, parent := range []string{"job_history", "attempts"} {
-			name := parent + "_p" + lo.Format("20060102")
-			var exists bool
-			if err := s.pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, name).Scan(&exists); err != nil {
-				return created, err
-			}
-			if exists {
+			var made bool
+			if err := s.pool.QueryRow(ctx, `SELECT jobscheduler_create_partition($1, $2)`, parent, day).Scan(&made); err != nil {
+				errs = append(errs, fmt.Errorf("create partition %s_p%s: %w", parent, day.Format("20060102"), err))
 				continue
 			}
-			sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM ('%s') TO ('%s')`,
-				pgx.Identifier{name}.Sanitize(), parent, lo.Format(time.RFC3339), hi.Format(time.RFC3339))
-			if _, err := s.pool.Exec(ctx, sql); err != nil {
-				errs = append(errs, fmt.Errorf("create partition %s: %w", name, err))
-				continue
+			if made {
+				created++
 			}
-			created++
 		}
 	}
 	return created, errors.Join(errs...)

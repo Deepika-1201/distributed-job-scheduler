@@ -1384,6 +1384,7 @@ If EKS is chosen, an optional kind or k3d profile will mirror the Kubernetes man
 | [ADR-024](decisions/ADR-024-load-test-gate.md) | Load-test gate: k6 submissions, an SDK worker fleet and server-side histograms | Accepted |
 | [ADR-025](decisions/ADR-025-per-pool-worker-tokens.md) | Per-pool worker tokens, issued through the API | Accepted |
 | [ADR-026](decisions/ADR-026-tls-in-process.md) | TLS terminated in the process, with certificate reload | Accepted |
+| [ADR-027](decisions/ADR-027-least-privilege-database-roles.md) | Least-privilege database roles | Accepted |
 
 ## Appendix C — Open questions for the LLD
 

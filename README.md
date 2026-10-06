@@ -10,7 +10,7 @@ A distributed job scheduling and execution platform: durable jobs that run now, 
 |---|---|
 | [High-level design](docs/architecture.md) | Requirements, architecture, failure scenarios, deployment |
 | [Low-level design](docs/low-level-design.md) | Code structure, state machines, algorithms (grows each phase) |
-| [Decision records](docs/decisions/) | ADR-001 to ADR-026, one decision per file |
+| [Decision records](docs/decisions/) | ADR-001 to ADR-027, one decision per file |
 | [Implementation plan](docs/implementation-plan.md) | Phases, exit criteria, status |
 
 ## Quick start
@@ -26,6 +26,8 @@ curl localhost:9090/metrics
 ```
 
 To run against an existing PostgreSQL instead: `JS_DATABASE_URL=postgres://... make migrate run`.
+
+Database roles ([ADR-027](docs/decisions/ADR-027-least-privilege-database-roles.md)): run migrations as the schema owner, and the nodes as a login role that is only a member of `jobscheduler_runtime`, which migrations create and grant. `docker compose` does this with `jobs` and `jobscheduler_app`; a `pgdata` volume created before this change lacks `jobscheduler_app`, so recreate it with `docker compose down -v`.
 
 Create a tenant and its first admin key, then call the API:
 
